@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">AtrisCast</string>
+    <string name="notification_channel_name">AtrisCast Receiver</string>
+    <string name="notification_channel_description">Keeps AtrisCast discoverable on your local network.</string>
+    <string name="notification_title">AtrisCast is ready</string>
+    <string name="notification_text">Waiting for a local AirPlay connection</string>
+</resources>
