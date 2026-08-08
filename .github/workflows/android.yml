@@ -27,7 +27,23 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install Android 17 SDK
-        run: sdkmanager "platforms;android-37" "build-tools;36.0.0" --channel=3
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_PACKAGES="$(sdkmanager --list --channel=3)"
+          printf '%s\n' "$SDK_PACKAGES" | grep -E 'platforms;android-(37|CinnamonBun)|build-tools;37' || true
+
+          if printf '%s\n' "$SDK_PACKAGES" | grep -q 'platforms;android-37'; then
+            PLATFORM_PACKAGE='platforms;android-37'
+          elif printf '%s\n' "$SDK_PACKAGES" | grep -q 'platforms;android-CinnamonBun'; then
+            PLATFORM_PACKAGE='platforms;android-CinnamonBun'
+          else
+            echo 'Android 17 platform package was not exposed by sdkmanager.' >&2
+            exit 1
+          fi
+
+          echo "Installing $PLATFORM_PACKAGE"
+          sdkmanager "$PLATFORM_PACKAGE" "build-tools;36.0.0" --channel=3
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
