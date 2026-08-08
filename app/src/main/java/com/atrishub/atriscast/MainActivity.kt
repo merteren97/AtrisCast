@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -30,9 +29,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Button
-import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.MaterialTheme
-import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import com.atrishub.atriscast.receiver.AtrisCastReceiverService
 import com.atrishub.atriscast.receiver.LocalNetworkPermission
@@ -68,47 +65,45 @@ private fun AtrisCastScreen() {
         }
     }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF080B10)) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xFF080B10))
-                .padding(horizontal = 72.dp, vertical = 52.dp)
-        ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                BrandHeader()
-                Spacer(Modifier.height(44.dp))
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF080B10))
+            .padding(horizontal = 72.dp, vertical = 52.dp)
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            BrandHeader()
+            Spacer(Modifier.height(44.dp))
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(28.dp),
-                ) {
-                    ReceiverCard(state, Modifier.weight(1.45f))
-                    InfoCard(state, Modifier.weight(1f))
-                }
-
-                Spacer(Modifier.weight(1f))
-
-                when {
-                    !LocalNetworkPermission.isGranted(context) && LocalNetworkPermission.isRequired() -> {
-                        Button(onClick = { permissionLauncher.launch(Manifest.permission.ACCESS_LOCAL_NETWORK) }) {
-                            Text("Allow local network access")
-                        }
-                    }
-                    state.phase == ReceiverPhase.ERROR -> {
-                        Button(onClick = { AtrisCastReceiverService.start(context) }) {
-                            Text("Restart receiver")
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(22.dp))
-                Text(
-                    "Local-only • No AtrisHub account required • atrishub.com",
-                    color = Color(0xFF82909E),
-                    fontSize = 15.sp,
-                )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(28.dp),
+            ) {
+                ReceiverCard(state, Modifier.weight(1.45f))
+                InfoCard(state, Modifier.weight(1f))
             }
+
+            Spacer(Modifier.weight(1f))
+
+            when {
+                !LocalNetworkPermission.isGranted(context) && LocalNetworkPermission.isRequired() -> {
+                    Button(onClick = { permissionLauncher.launch(Manifest.permission.ACCESS_LOCAL_NETWORK) }) {
+                        Text("Allow local network access")
+                    }
+                }
+                state.phase == ReceiverPhase.ERROR -> {
+                    Button(onClick = { AtrisCastReceiverService.start(context) }) {
+                        Text("Restart receiver")
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(22.dp))
+            Text(
+                "Local-only • No AtrisHub account required • atrishub.com",
+                color = Color(0xFF82909E),
+                fontSize = 15.sp,
+            )
         }
     }
 }
