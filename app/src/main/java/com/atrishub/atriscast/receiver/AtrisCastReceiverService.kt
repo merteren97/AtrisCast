@@ -77,9 +77,47 @@ class AtrisCastReceiverService : Service() {
             deviceId = identity.deviceId,
             persistentId = identity.persistentId,
             onClient = { remote ->
-                ReceiverRuntime.update { it.copy(phase = ReceiverPhase.CLIENT_CONNECTED, remoteAddress = remote) }
+                ReceiverRuntime.update {
+                    it.copy(
+                        phase = ReceiverPhase.CLIENT_CONNECTED,
+                        remoteAddress = remote,
+                        lastSenderAddress = remote,
+                        lastRequest = null,
+                        protocolStage = ProtocolStage.DISCOVERY,
+                        mediaBytesReceived = 0L,
+                        error = null,
+                    )
+                }
             },
-            onRequest = { request -> ReceiverRuntime.update { it.copy(lastRequest = request) } },
+            onRequest = { request ->
+                ReceiverRuntime.update {
+                    it.copy(
+                        lastRequest = request,
+                        protocolStage = requestStage(request, it.protocolStage),
+                    )
+                }
+            },
+            onTransportReady = { summary ->
+                ReceiverRuntime.update {
+                    it.copy(
+                        lastRequest = summary,
+                        protocolStage = maxStage(it.protocolStage, ProtocolStage.TRANSPORT),
+                        error = null,
+                    )
+                }
+            },
+            onMediaActivity = { bytes ->
+                ReceiverRuntime.update {
+                    val total = it.mediaBytesReceived + bytes
+                    it.copy(
+                        protocolStage = ProtocolStage.STREAMING,
+                        mediaBytesReceived = total,
+                        // Existing UI treats RECORD as the streaming stage; keep the live byte count visible too.
+                        lastRequest = "RECORD • media stream • $total B received",
+                        error = null,
+                    )
+                }
+            },
             onClientClosed = {
                 ReceiverRuntime.update { it.copy(phase = ReceiverPhase.ADVERTISING, remoteAddress = null) }
             },
@@ -113,6 +151,19 @@ class AtrisCastReceiverService : Service() {
             onError = { message -> ReceiverRuntime.update { it.copy(phase = ReceiverPhase.ERROR, error = message) } },
         ).also { it.start(preferences.displayName) }
     }
+
+    private fun requestStage(request: String, current: ProtocolStage): ProtocolStage {
+        val normalized = request.uppercase()
+        val next = when {
+            normalized.contains("/FP-SETUP") -> ProtocolStage.FAIRPLAY
+            normalized.contains("/INFO") || normalized.startsWith("OPTIONS") -> ProtocolStage.NEGOTIATION
+            else -> current
+        }
+        return maxStage(current, next)
+    }
+
+    private fun maxStage(current: ProtocolStage, candidate: ProtocolStage): ProtocolStage =
+        if (candidate.ordinal > current.ordinal) candidate else current
 
     private fun stopReceiver() {
         advertiser?.stop()

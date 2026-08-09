@@ -9,13 +9,15 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Local AirPlay RTSP endpoint used for discovery and session negotiation. */
+/** Local AirPlay RTSP endpoint used for discovery, negotiation and transport bring-up. */
 class AirPlaySocketServer(
     displayName: String,
     deviceId: String,
     persistentId: String,
     private val onClient: (String) -> Unit,
     private val onRequest: (String) -> Unit,
+    private val onTransportReady: (String) -> Unit,
+    private val onMediaActivity: (Long) -> Unit,
     private val onClientClosed: () -> Unit,
     private val onError: (String) -> Unit,
 ) {
@@ -69,6 +71,10 @@ class AirPlaySocketServer(
             client.soTimeout = 30_000
             val remote = client.inetAddress?.hostAddress ?: "Unknown sender"
             val fairPlay = FairPlayHandshake()
+            val setup = AirPlaySetupSession(
+                remoteAddress = client.inetAddress,
+                onMediaActivity = onMediaActivity,
+            )
             onClient(remote)
 
             val input = BufferedInputStream(client.getInputStream())
@@ -77,21 +83,27 @@ class AirPlaySocketServer(
             try {
                 while (running.get() && !client.isClosed) {
                     val request = RtspRequestParser.read(input) ?: break
-                    onRequest(describeRequest(request))
-                    output.write(responseFor(request, fairPlay))
+                    // SETUP only advances diagnostics after its binary-plist response was built successfully.
+                    if (!request.method.equals("SETUP", true)) onRequest(describeRequest(request))
+                    output.write(responseFor(request, fairPlay, setup))
                     output.flush()
                 }
             } catch (_: java.net.SocketTimeoutException) {
-                // Idle negotiation sockets can be closed without turning the receiver into an error state.
+                // Idle negotiation sockets can close without turning the receiver into an error state.
             } catch (e: Exception) {
                 if (running.get()) onError("RTSP client error: ${e.message ?: e.javaClass.simpleName}")
             } finally {
+                setup.close()
                 onClientClosed()
             }
         }
     }
 
-    private fun responseFor(request: RtspRequest, fairPlay: FairPlayHandshake): ByteArray {
+    private fun responseFor(
+        request: RtspRequest,
+        fairPlay: FairPlayHandshake,
+        setup: AirPlaySetupSession,
+    ): ByteArray {
         val method = request.method.uppercase()
         val path = request.target.substringBefore('?')
         val protocol = responseProtocol(request.protocol)
@@ -101,7 +113,7 @@ class AirPlaySocketServer(
                 protocol = protocol,
                 cSeq = request.cSeq,
                 extraHeaders = listOf(
-                    "Public" to "OPTIONS, GET, POST, SETUP, RECORD, SET_PARAMETER, GET_PARAMETER, TEARDOWN"
+                    "Public" to "SETUP, RECORD, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER"
                 ),
             )
 
@@ -131,7 +143,43 @@ class AirPlaySocketServer(
                 }
             }
 
-            method == "POST" && path.endsWith("/feedback") -> response(
+            method == "SETUP" -> {
+                try {
+                    val result = setup.respond(request.body)
+                    onTransportReady("SETUP • ${result.summary}")
+                    response(
+                        protocol = protocol,
+                        cSeq = request.cSeq,
+                        contentType = "application/x-apple-binary-plist",
+                        body = result.body,
+                        extraHeaders = listOf("Audio-Jack-Status" to "connected; type=digital"),
+                    )
+                } catch (e: Exception) {
+                    onError("AirPlay SETUP rejected: ${e.message ?: e.javaClass.simpleName}")
+                    response(
+                        protocol = protocol,
+                        statusCode = 400,
+                        reason = "Bad Request",
+                        cSeq = request.cSeq,
+                    )
+                }
+            }
+
+            method == "RECORD" -> response(
+                protocol = protocol,
+                cSeq = request.cSeq,
+                extraHeaders = listOf(
+                    "Audio-Latency" to "11025",
+                    "Audio-Jack-Status" to "connected; type=analog",
+                ),
+            )
+
+            method == "FLUSH" -> response(
+                protocol = protocol,
+                cSeq = request.cSeq,
+            )
+
+            method == "POST" && (path.endsWith("/feedback") || path.endsWith("/audioMode")) -> response(
                 protocol = protocol,
                 cSeq = request.cSeq,
             )

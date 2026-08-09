@@ -9,12 +9,23 @@ enum class ReceiverPhase {
     ERROR,
 }
 
+enum class ProtocolStage {
+    DISCOVERY,
+    NEGOTIATION,
+    FAIRPLAY,
+    TRANSPORT,
+    STREAMING,
+}
+
 data class ReceiverState(
     val phase: ReceiverPhase = ReceiverPhase.STOPPED,
     val advertisedName: String = "AtrisCast",
     val networkLabel: String = "Checking network…",
     val localAddress: String? = null,
     val remoteAddress: String? = null,
+    val lastSenderAddress: String? = null,
     val lastRequest: String? = null,
+    val protocolStage: ProtocolStage = ProtocolStage.DISCOVERY,
+    val mediaBytesReceived: Long = 0L,
     val error: String? = null,
 )
