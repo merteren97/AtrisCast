@@ -1,5 +1,25 @@
 # AtrisCast
 
+<p align="center">
+  <img src="assets/atriscast-logo.svg" alt="AtrisCast logo" width="440" />
+</p>
+
+<p align="center">
+  <strong>Open-source, local-first AirPlay receiver for Google TV and Android TV.</strong>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/License-Apache--2.0-12C7C1.svg" /></a>
+  <img alt="Platform: Google TV / Android TV" src="https://img.shields.io/badge/Platform-Google%20TV%20%2F%20Android%20TV-202B33.svg" />
+  <img alt="Status: Early Alpha" src="https://img.shields.io/badge/Status-Early%20Alpha-202B33.svg" />
+</p>
+
+<p align="center">
+  <img src="assets/atriscast-preview.svg" alt="AtrisCast repository preview" width="100%" />
+</p>
+
+<p align="center"><sub>Concept preview. The interface and receiver capabilities will evolve as protocol support is implemented.</sub></p>
+
 **AtrisCast** is an open-source, local-first casting receiver for Google TV and Android TV.
 The project is part of the **AtrisHub** ecosystem, but the application itself is intentionally standalone: **no AtrisHub account, login, cloud service, telemetry, or remote backend is required to run the receiver.**
 
@@ -54,7 +74,14 @@ A build made with that flag can negotiate AirPlay transport but cannot decrypt o
 
 AtrisCast is not yet a production-ready AirPlay receiver. Compatibility is being developed incrementally against real Apple-device handshakes. The Diagnostics page records the latest protocol and video stage so real-device regressions can be isolated without exposing technical detail on the normal Home screen.
 
-## Privacy
+## Brand assets
+
+Repository-safe vector brand assets live under [`assets/`](assets/):
+
+- [`atriscast-logo.svg`](assets/atriscast-logo.svg) — primary AtrisCast product logo
+- [`atriscast-preview.svg`](assets/atriscast-preview.svg) — repository / README preview artwork
+
+## Compatibility note
 
 AtrisCast is designed to run entirely on the local network. It does not require an AtrisHub login or cloud connection and does not send casting traffic to an AtrisHub backend.
 

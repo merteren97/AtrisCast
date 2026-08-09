@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 560" role="img" aria-labelledby="title desc">
+  <title id="title">AtrisCast logo</title>
+  <desc id="desc">AtrisCast product mark combining the Atris A with a casting screen and signal waves.</desc>
+
+  <g transform="translate(110 20)">
+    <path d="M255 95 H520 Q565 95 565 140 V300 Q565 335 530 335 H475"
+          fill="none" stroke="#202B33" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <path d="M210 188 A116 116 0 0 1 326 304" fill="none" stroke="#12C7C1" stroke-width="34" stroke-linecap="round"/>
+    <path d="M210 235 A69 69 0 0 1 279 304" fill="none" stroke="#12C7C1" stroke-width="34" stroke-linecap="round"/>
+    <path d="M210 282 A22 22 0 0 1 232 304" fill="none" stroke="#12C7C1" stroke-width="34" stroke-linecap="round"/>
+
+    <path d="M286 334 L428 103 Q444 77 470 77 Q497 77 513 103 L646 334 H576 L469 164 L363 334 Z"
+          fill="#12C7C1"/>
+    <path d="M469 164 L576 334 H511 L438 221 Z" fill="#202B33"/>
+  </g>
+
+  <g font-family="Inter, Segoe UI, Arial, sans-serif" font-size="112" font-weight="700" letter-spacing="-4">
+    <text x="166" y="510" fill="#202B33">Atris</text>
+    <text x="446" y="510" fill="#12C7C1">Cast</text>
+  </g>
+</svg>
