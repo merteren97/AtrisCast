@@ -32,8 +32,8 @@ class MirrorStreamReceiver(
         data class Config(
             val sps: ByteArray,
             val pps: ByteArray,
-            val width: Int,
-            val height: Int,
+            val codedWidth: Int,
+            val codedHeight: Int,
         ) : WorkItem
 
         data class Frame(val annexB: ByteArray) : WorkItem
@@ -68,11 +68,9 @@ class MirrorStreamReceiver(
                     accepted.soTimeout = SOCKET_TIMEOUT_MS
                     onStarted()
 
-                    // onStarted switches Compose to MirrorPlaybackScreen, whose SurfaceView is
-                    // process-local and therefore does not exist before the data connection. Give
-                    // that surface a short head start so the initial SPS/PPS + IDR stays in the TCP
-                    // receive buffer instead of racing the UI. MirrorVideoDecoder also buffers the
-                    // GOP as a second line of defence when Activity launch is slower than this wait.
+                    // Compose creates the playback surface after the type-110 connection becomes
+                    // active. Give it a short head start, while MirrorVideoDecoder still keeps the
+                    // initial GOP if Activity/Surface scheduling takes longer on a particular TV.
                     waitForRenderSurface()
                     readClient(accepted)
                     break
@@ -126,8 +124,9 @@ class MirrorStreamReceiver(
                             continue
                         }
 
-                        // Always advance the AES-CTR stream for every video payload. Skipping an
-                        // encrypted packet would desynchronize all following payloads.
+                        // AES-CTR is continuous over the complete mirror stream. Every encrypted
+                        // payload must therefore advance this Cipher even when the frame is later
+                        // dropped for decoding/latency reasons.
                         val decrypted = cipher.update(payload) ?: ByteArray(0)
                         val parsed = MirrorCrypto.parseAvccFrame(decrypted)
                         if (parsed == null) {
@@ -177,15 +176,33 @@ class MirrorStreamReceiver(
         var ptsUs = 0L
         try {
             while (running.get() || queue.isNotEmpty()) {
-                when (val item = queue.poll(200, TimeUnit.MILLISECONDS) ?: continue) {
-                    is WorkItem.Config -> decoder.configure(item.sps, item.pps, item.width, item.height)
+                val item = queue.poll(DECODER_POLL_MS, TimeUnit.MILLISECONDS)
+                when (item) {
+                    is WorkItem.Config -> decoder.configure(
+                        item.sps,
+                        item.pps,
+                        item.codedWidth,
+                        item.codedHeight,
+                    )
                     is WorkItem.Frame -> {
                         if (resyncRequested.getAndSet(false)) decoder.requestResync()
                         decoder.decode(item.annexB, ptsUs)
                         ptsUs += FRAME_INTERVAL_US
                     }
+                    null -> Unit
                 }
+
+                // AirPlay is change-driven: a static iPhone screen may stop sending frames after an
+                // IDR. MediaCodec output becomes available asynchronously a few milliseconds later,
+                // so output MUST be drained independently of new input. The alpha08 decoder only
+                // drained after queueInputBuffer(), which could leave the last decoded picture
+                // trapped forever until the user touched the phone again.
+                decoder.pumpOutput(if (item == null) IDLE_OUTPUT_WAIT_US else 0L)
             }
+
+            // Give a final decoded picture a chance to reach the Surface when the sender closes
+            // immediately after its last frame.
+            repeat(FINAL_DRAIN_ATTEMPTS) { decoder.pumpOutput(FINAL_OUTPUT_WAIT_US) }
         } catch (e: Exception) {
             if (running.get()) onError("Mirror decoder worker failed: ${e.message ?: e.javaClass.simpleName}")
         } finally {
@@ -194,6 +211,16 @@ class MirrorStreamReceiver(
     }
 
     private fun enqueue(item: WorkItem) {
+        if (item is WorkItem.Config) {
+            // A new SPS/PPS describes a new prediction/format epoch. Old queued frames are no longer
+            // useful and may even belong to a different geometry. Preserve the config and wait for
+            // the IDR that AirPlay sends immediately after it, matching UxPlay's resync behaviour.
+            queue.clear()
+            queue.offer(item)
+            resyncRequested.set(true)
+            return
+        }
+
         if (queue.offer(item)) return
         queue.poll()
         queue.offer(item)
@@ -224,14 +251,24 @@ class MirrorStreamReceiver(
             val ppsEnd = ppsStart + ppsLength
             require(ppsLength > 0 && ppsEnd <= payload.size) { "invalid PPS length" }
 
-            val width = videoDimension(header, 56, AirPlayProfile.DISPLAY_WIDTH.toInt())
-            val height = videoDimension(header, 60, AirPlayProfile.DISPLAY_HEIGHT.toInt())
+            val sps = payload.copyOfRange(spsStart, spsEnd)
+            val pps = payload.copyOfRange(ppsStart, ppsEnd)
+            val headerWidth = videoDimension(header, 56, AirPlayProfile.DISPLAY_WIDTH.toInt())
+            val headerHeight = videoDimension(header, 60, AirPlayProfile.DISPLAY_HEIGHT.toInt())
+            val spsDimensions = H264SpsParser.parseDimensions(sps)
+
+            // Header offsets 56/60 describe the visible AirPlay picture and can legitimately be a
+            // cropped width such as 498 pixels in portrait mode. MediaCodec should be initialized
+            // with the macroblock-coded SPS dimensions (e.g. 512x1088), then let the SPS crop/output
+            // format expose the visible rectangle (e.g. 498x1080).
+            val codedWidth = spsDimensions?.codedWidth ?: alignToMacroblock(headerWidth)
+            val codedHeight = spsDimensions?.codedHeight ?: alignToMacroblock(headerHeight)
 
             WorkItem.Config(
-                sps = payload.copyOfRange(spsStart, spsEnd),
-                pps = payload.copyOfRange(ppsStart, ppsEnd),
-                width = width,
-                height = height,
+                sps = sps,
+                pps = pps,
+                codedWidth = codedWidth,
+                codedHeight = codedHeight,
             )
         }.getOrElse {
             onError("Could not parse H.264 SPS/PPS: ${it.message ?: it.javaClass.simpleName}")
@@ -248,6 +285,8 @@ class MirrorStreamReceiver(
             fallback
         }
     }
+
+    private fun alignToMacroblock(value: Int): Int = ((value.coerceAtLeast(16) + 15) / 16) * 16
 
     private fun readFully(input: InputStream, target: ByteArray): Boolean {
         var offset = 0
@@ -295,6 +334,10 @@ class MirrorStreamReceiver(
         private const val FRAME_INTERVAL_US = 1_000_000L / 60L
         private const val SURFACE_STARTUP_GRACE_MS = 1_500L
         private const val SURFACE_POLL_MS = 10L
+        private const val DECODER_POLL_MS = 8L
+        private const val IDLE_OUTPUT_WAIT_US = 4_000L
+        private const val FINAL_OUTPUT_WAIT_US = 8_000L
+        private const val FINAL_DRAIN_ATTEMPTS = 3
         private const val INVALID_VIDEO_DIAGNOSTIC_THRESHOLD = 3
         private const val MIN_VIDEO_DIMENSION = 16f
         private const val MAX_VIDEO_DIMENSION = 8192f
