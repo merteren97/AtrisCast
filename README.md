@@ -23,108 +23,56 @@
 **AtrisCast** is an open-source, local-first casting receiver for Google TV and Android TV.
 The project is part of the **AtrisHub** ecosystem, but the application itself is intentionally standalone: **no AtrisHub account, login, cloud service, telemetry, or remote backend is required to run the receiver.**
 
-> Project status: **early alpha / protocol bring-up**. The current milestone implements the Google TV shell, foreground receiver runtime, AirPlay/RAOP Bonjour discovery, a persistent local receiver identity, and a diagnostic RTSP endpoint on TCP port 7000. Pairing, FairPlay session negotiation, media transport and playback are not complete yet.
+> Project status: **early alpha / real-device protocol validation**. Alpha05 adds the first complete screen-mirroring video path: FairPlay session-key handling, encrypted type-110 mirror packet processing, H.264 extraction, Android hardware decoding and full-screen Surface rendering. This path is implemented and CI-tested but still requires validation across real iPhone/iPad/macOS and Google TV firmware combinations.
 
 ## Why AtrisCast?
 
 Many Google TV devices do not expose AirPlay receiving as a platform feature. AtrisCast explores a clean, Android-native receiver architecture focused on local-network discovery, low-latency media pipelines and a TV-first user experience.
 
-The long-term target is a receiver that can be installed directly on a compatible Google TV / Android TV device and discovered from iPhone, iPad and Mac devices on the same LAN.
-
-## Current milestone
+## Current alpha capabilities
 
 - Google TV / Android TV launcher application
-- TV-first Jetpack Compose UI
-- No login and no cloud dependency
-- Android foreground receiver service
-- Automatic restart after boot (when enabled and permission is available)
-- Persistent locally generated device identity
-- `_airplay._tcp` Bonjour / mDNS advertisement
-- `_raop._tcp` Bonjour / mDNS advertisement
-- Wi-Fi multicast handling for background discovery
-- Android 17 local-network permission support
-- Diagnostic RTSP server on TCP `7000`
-- RTSP `OPTIONS` response and handshake visibility in the UI
-- GitHub Actions build, lint and unit-test workflow
+- local-only foreground receiver service
+- `_airplay._tcp` and `_raop._tcp` discovery
+- persistent local receiver identity without exposing the hardware MAC address
+- AirPlay control endpoint on TCP 7000
+- binary-plist `GET /info` capability response
+- FairPlay `POST /fp-setup` phase 1 / phase 2 negotiation
+- binary-plist `SETUP` transport negotiation
+- local UDP timing channel
+- type-110 mirror TCP packet parser
+- FairPlay session-key decryption through a separately licensed native bridge
+- AES-CTR mirror stream processing and AVCC-to-Annex-B H.264 conversion
+- Android `MediaCodec` H.264 hardware decode to a live `SurfaceView`
+- automatic full-screen playback UI while a mirror stream is active
+- decoder re-attachment when Android recreates the rendering Surface
+- mirror diagnostics for bytes received, rendered frames, output resolution and decode errors
+- type-96 audio UDP data/control listeners and type-103 buffered-audio transport bring-up
+- `RECORD`, `FLUSH`, `GET_PARAMETER`, `SET_PARAMETER`, `TEARDOWN`, `/feedback` and `/audioMode` control acknowledgements
+- English and Turkish TV interface, with English as the default
 
-## Roadmap
-
-1. **Discovery — in progress**
-   - Verify AtrisCast appears in iOS/macOS Screen Mirroring pickers across real Google TV devices.
-2. **Protocol information and pairing**
-   - `/info`, binary plist, pair-setup, pair-verify and persistent controllers.
-3. **Mirroring session**
-   - SETUP / RECORD, timing channels, encrypted mirroring stream.
-4. **Video**
-   - H.264 reassembly and Android `MediaCodec` hardware decode to `Surface`.
-5. **Audio**
-   - AAC first, ALAC where required, `AudioTrack` output and retransmit support.
-6. **Synchronization and resilience**
-   - AirPlay clock / NTP, jitter buffers, A/V sync, network handoff and recovery.
-7. **TV polish**
-   - Pairing PIN, receiver settings, device naming, diagnostics and release packaging.
-
-## Architecture
-
-```text
-Apple sender (LAN)
-       │
-       ├── Bonjour / mDNS
-       │     ├── _airplay._tcp
-       │     └── _raop._tcp
-       │
-       └── RTSP / AirPlay session
-                 │
-        ┌────────▼────────┐
-        │    AtrisCast    │
-        │   Google TV     │
-        ├─────────────────┤
-        │ ReceiverService │
-        │ Discovery       │
-        │ RTSP            │
-        │ Pairing*        │
-        │ Mirroring*      │
-        │ MediaCodec*     │
-        │ AudioTrack*     │
-        └─────────────────┘
-
-* planned / under development
-```
-
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the module boundaries and implementation rules.
+Audio decode/playback and broader sender/firmware compatibility remain under development.
 
 ## Build requirements
 
-- Android Studio with Android 17 / API 37 SDK
+- Android Studio / Android SDK 37.1
 - JDK 17
 - Gradle 9.5+
-- Android Gradle Plugin 9.3.x
+- Android NDK `27.2.12479018`
+- Rust toolchain compatible with the pinned native dependency
+- `cargo-ndk` 4.1.2
 
-This repository intentionally keeps generated binaries out of source control. If you have Gradle installed locally:
+The standard build compiles a replaceable LGPL FairPlay JNI shared library for Android. The build fetches the pinned `shairplay-rust` source revision and packages its license notices into the APK. For protocol/UI development where encrypted mirroring is intentionally unavailable, the native component can be skipped with:
 
 ```bash
-gradle assembleDebug
+gradle assembleDebug -PskipFairPlayNative=true
 ```
 
-The CI workflow installs Gradle 9.5 and Android API 37 explicitly, then runs tests, lint and a debug APK build.
+A build made with that flag can negotiate AirPlay transport but cannot decrypt or display encrypted screen-mirroring video.
 
-## Local-only design
+## Development status
 
-AtrisCast's receiver path is designed to stay on your LAN:
-
-- no account authentication
-- no AtrisHub API requirement
-- no hosted relay
-- no analytics SDK
-- no remote command channel
-
-AtrisHub remains the product family and project home, not a runtime dependency.
-
-## AtrisHub
-
-AtrisCast is an AtrisHub open-source project.
-
-**AtrisHub:** `https://atrishub.com`
+AtrisCast is not yet a production-ready AirPlay receiver. Compatibility is being developed incrementally against real Apple-device handshakes. The Diagnostics page records the latest protocol and video stage so real-device regressions can be isolated without exposing technical detail on the normal Home screen.
 
 ## Brand assets
 
@@ -135,16 +83,18 @@ Repository-safe vector brand assets live under [`assets/`](assets/):
 
 ## Compatibility note
 
-AirPlay is a proprietary Apple technology. AtrisCast is an independent interoperability project and is not affiliated with Apple. Protected/DRM media may not be available to third-party receivers. Compatibility can vary by sender OS version and device firmware.
+AtrisCast is designed to run entirely on the local network. It does not require an AtrisHub login or cloud connection and does not send casting traffic to an AtrisHub backend.
 
-The project does not ship Apple proprietary certificates, keys or firmware.
+## Licensing
 
-## License
+The Android/Kotlin AtrisCast application is licensed under Apache License 2.0. The FairPlay JNI bridge is intentionally isolated as a replaceable native component and includes LGPL-3.0-or-later code from the pinned `shairplay-rust` dependency. See `THIRD_PARTY_NOTICES.md` for the exact boundary and revision.
 
-Apache License 2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+## Project
 
-Before introducing third-party protocol code, cryptographic implementations or native decoders, contributors must verify and preserve the upstream license. Do not import GPL code into the Apache-licensed core without an explicit repository-level licensing decision.
+AtrisCast is an independent open-source project in the AtrisHub ecosystem.
 
-## Turkish
+- Website: `atrishub.com`
+- License: Apache License 2.0 (see `LICENSE`)
+- Third-party notices: see `THIRD_PARTY_NOTICES.md`
 
-Türkçe README için: [`README_TR.md`](README_TR.md)
+AirPlay, iPhone, iPad, Mac and Apple TV are trademarks of Apple Inc. AtrisCast is not affiliated with, endorsed by, or sponsored by Apple Inc.
