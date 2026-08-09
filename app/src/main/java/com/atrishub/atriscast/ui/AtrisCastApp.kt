@@ -60,6 +60,11 @@ fun AtrisCastApp() {
         if (LocalNetworkPermission.isGranted(context)) AtrisCastReceiverService.start(context)
     }
 
+    if (state.mirrorActive) {
+        MirrorPlaybackScreen(state)
+        return
+    }
+
     Row(
         modifier = Modifier
             .fillMaxSize()

@@ -1,7 +1,34 @@
+import java.io.File
+import java.net.URI
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+fun runCheckedProcess(
+    workingDir: File,
+    command: List<String>,
+    extraEnvironment: Map<String, String> = emptyMap(),
+) {
+    val process = ProcessBuilder(command)
+        .directory(workingDir)
+        .inheritIO()
+        .apply { environment().putAll(extraEnvironment) }
+        .start()
+    val exitCode = process.waitFor()
+    check(exitCode == 0) { "Command failed ($exitCode): ${command.joinToString(" ")}" }
+}
+
+val fairPlayRevision = "aaf5025267ba71d6eb5bb631d0b518b7354102a8"
+val spdxLicenseRevision = "5bf6d9610255540bfbee6890765a616042bf1e11"
+val fairPlayBridgeDir = rootProject.file("native/fairplay-bridge")
+val fairPlayVendorDir = fairPlayBridgeDir.resolve("vendor/shairplay-rust")
+val fairPlayMarker = fairPlayVendorDir.resolve(".atriscast-revision")
+val fairPlayOutputDir = layout.buildDirectory.dir("generated/fairplay/jniLibs")
+val fairPlayAssetsDir = layout.buildDirectory.dir("generated/fairplay/assets")
+val fairPlayCargoTargetDir = layout.buildDirectory.dir("fairplay-cargo-target")
+val skipFairPlayNative = providers.gradleProperty("skipFairPlayNative").orNull == "true"
 
 android {
     namespace = "com.atrishub.atriscast"
@@ -10,13 +37,14 @@ android {
             minorApiLevel = 1
         }
     }
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         applicationId = "com.atrishub.atriscast"
         minSdk = 26
         targetSdk = 37
-        versionCode = 4
-        versionName = "0.1.0-alpha04"
+        versionCode = 5
+        versionName = "0.1.0-alpha05"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -31,11 +59,117 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    // AGP 9 no longer accepts Provider<Directory> through the legacy SourceSet API. These generated
+    // paths are concrete Files here; preBuild below carries the task dependency that populates them.
+    sourceSets.getByName("main").apply {
+        jniLibs.srcDir(fairPlayOutputDir.get().asFile)
+        assets.srcDir(fairPlayAssetsDir.get().asFile)
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+}
+
+val prepareFairPlayRust = tasks.register("prepareFairPlayRust") {
+    description = "Fetch the pinned LGPL shairplay-rust source used by the FairPlay JNI bridge."
+    outputs.dir(fairPlayVendorDir)
+    outputs.dir(fairPlayAssetsDir)
+
+    doLast {
+        if (skipFairPlayNative) return@doLast
+        val sourceFile = fairPlayVendorDir.resolve("src/crypto/fairplay.rs")
+        val upstreamLicense = fairPlayVendorDir.resolve("LICENSE")
+        val assetsLicenseDir = fairPlayAssetsDir.get().asFile.resolve("licenses")
+
+        val vendorReady = fairPlayMarker.exists() &&
+            fairPlayMarker.readText().trim() == fairPlayRevision &&
+            sourceFile.exists() && upstreamLicense.exists()
+
+        if (!vendorReady) {
+            fairPlayVendorDir.deleteRecursively()
+            fairPlayVendorDir.parentFile.mkdirs()
+            fairPlayVendorDir.mkdirs()
+
+            runCheckedProcess(fairPlayVendorDir, listOf("git", "init", "--quiet"))
+            runCheckedProcess(
+                fairPlayVendorDir,
+                listOf("git", "remote", "add", "origin", "https://github.com/metaneutrons/shairplay-rust.git")
+            )
+            runCheckedProcess(fairPlayVendorDir, listOf("git", "fetch", "--quiet", "--depth", "1", "origin", fairPlayRevision))
+            runCheckedProcess(fairPlayVendorDir, listOf("git", "checkout", "--quiet", "--detach", "FETCH_HEAD"))
+
+            check(sourceFile.exists()) { "Pinned shairplay FairPlay source was not fetched" }
+            val original = sourceFile.readText()
+            val visibilityNeedle = "pub(crate) fn decrypt(&self"
+            val visibilityIndex = original.indexOf(visibilityNeedle)
+            check(visibilityIndex >= 0) {
+                "Pinned shairplay FairPlay API changed; refusing to patch an unexpected source tree"
+            }
+            sourceFile.writeText(
+                original.replaceRange(
+                    visibilityIndex,
+                    visibilityIndex + visibilityNeedle.length,
+                    "pub fn decrypt(&self",
+                )
+            )
+            fairPlayMarker.writeText(fairPlayRevision)
+        }
+
+        assetsLicenseDir.mkdirs()
+        upstreamLicense.copyTo(assetsLicenseDir.resolve("LGPL-3.0-or-later.txt"), overwrite = true)
+
+        // Ubuntu build hosts already ship the canonical GPL v3 text. Prefer that local copy so
+        // normal CI does not depend on a second external host merely to package a license notice.
+        // Other hosts use a revision-pinned SPDX copy as a deterministic fallback.
+        val systemGpl = File("/usr/share/common-licenses/GPL-3")
+        val gplBytes = if (systemGpl.isFile) {
+            systemGpl.readBytes()
+        } else {
+            URI(
+                "https://raw.githubusercontent.com/spdx/license-list-data/" +
+                    "$spdxLicenseRevision/text/GPL-3.0-only.txt"
+            ).toURL().readBytes()
+        }
+        assetsLicenseDir.resolve("GPL-3.0.txt").writeBytes(gplBytes)
+    }
+}
+
+val buildFairPlayBridge = tasks.register("buildFairPlayBridge") {
+    description = "Build the LGPL FairPlay decryptor as a replaceable Android shared library."
+    dependsOn(prepareFairPlayRust)
+    outputs.dir(fairPlayOutputDir)
+
+    doLast {
+        val outputDir = fairPlayOutputDir.get().asFile
+        outputDir.mkdirs()
+        if (skipFairPlayNative) {
+            logger.warn("FairPlay native bridge skipped; the APK will negotiate AirPlay but cannot decrypt mirroring video.")
+            return@doLast
+        }
+
+        runCheckedProcess(
+            fairPlayBridgeDir,
+            listOf(
+                "cargo", "ndk",
+                "-t", "arm64-v8a",
+                "-t", "armeabi-v7a",
+                "-t", "x86_64",
+                "-o", outputDir.absolutePath,
+                "build", "--release",
+                "--manifest-path", fairPlayBridgeDir.resolve("Cargo.toml").absolutePath,
+            ),
+            extraEnvironment = mapOf(
+                "CARGO_TARGET_DIR" to fairPlayCargoTargetDir.get().asFile.absolutePath,
+            ),
+        )
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(buildFairPlayBridge)
 }
 
 dependencies {
