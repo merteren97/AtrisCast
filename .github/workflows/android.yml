@@ -67,7 +67,20 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          gradle assembleDebug --stacktrace --console=plain 2>&1 | tee assemble.log
+          gradle assembleDebug -PskipFairPlayNative=false --stacktrace --console=plain 2>&1 | tee assemble.log
+
+      - name: Verify FairPlay bridge in APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="app/build/outputs/apk/debug/app-debug.apk"
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            library="lib/${abi}/libatriscast_fairplay.so"
+            if ! unzip -l "$apk" "$library" | grep -Fq "$library"; then
+              echo "::error::Missing ${library} in ${apk}"
+              exit 1
+            fi
+          done
 
       - name: Upload assemble diagnostics
         if: always()
