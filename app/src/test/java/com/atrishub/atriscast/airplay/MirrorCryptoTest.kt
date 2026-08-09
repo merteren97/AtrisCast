@@ -1,6 +1,7 @@
 package com.atrishub.atriscast.airplay
 
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.fail
 import org.junit.Test
 
 class MirrorCryptoTest {
@@ -29,16 +30,40 @@ class MirrorCryptoTest {
     }
 
     @Test
-    fun legacyVideoCipherMatchesAirPlayKdfRegressionVector() {
+    fun unpairedVideoCipherUsesFairPlayKeyDirectly() {
         val key = ByteArray(16) { it.toByte() }
         val payload = ByteArray(48) { (it * 3).toByte() }
 
         val result = MirrorCrypto.createVideoCipher(key, 0x1234_5678L).update(payload)
 
         assertArrayEquals(
-            hex("f41089f1bbdd1f2ac7077e8212695b2e6293fec5d4ff0cca485f9c72ad75a07840e80f8d39a43f406c03f009d14f12db"),
+            hex("0b0d5844dee90d1eeb41d10e8b98b3d32d51f44deb49e060d541785ec09cf396741bf0745d53f3b0025d0a3f9a540851"),
             result,
         )
+    }
+
+    @Test
+    fun pairedVideoCipherMixesTheEcdhSecretBeforeStreamDerivation() {
+        val key = ByteArray(16) { it.toByte() }
+        val ecdhSecret = ByteArray(32) { (it + 32).toByte() }
+        val payload = ByteArray(48) { (it * 3).toByte() }
+
+        val result = MirrorCrypto.createVideoCipher(key, 0x1234_5678L, ecdhSecret).update(payload)
+
+        assertArrayEquals(
+            hex("7b55964e0aeba8f63986bef0f8c100c9256e7e0d8db0797c0dcdf39581ecf8277243ce2bdb059a47e21ff34298545e7d"),
+            result,
+        )
+    }
+
+    @Test
+    fun videoCipherRejectsInvalidEcdhSecretLength() {
+        try {
+            MirrorCrypto.createVideoCipher(ByteArray(16), 1L, ByteArray(31))
+            fail("Expected an invalid ECDH secret length to be rejected")
+        } catch (_: IllegalArgumentException) {
+            // Expected.
+        }
     }
 
     private fun lengthPrefix(bytes: ByteArray): ByteArray = byteArrayOf(
