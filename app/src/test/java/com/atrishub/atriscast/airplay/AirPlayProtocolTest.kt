@@ -1,5 +1,6 @@
 package com.atrishub.atriscast.airplay
 
+import com.dd.plist.NSArray
 import com.dd.plist.NSDictionary
 import com.dd.plist.NSNumber
 import com.dd.plist.NSString
@@ -31,5 +32,21 @@ class AirPlayProtocolTest {
         assertEquals("02:11:22:33:44:55", (root.objectForKey("deviceID") as NSString).content)
         assertEquals(AirPlayProfile.MODEL, (root.objectForKey("model") as NSString).content)
         assertEquals(AirPlayProfile.FEATURES_LOW, (root.objectForKey("features") as NSNumber).longValue())
+    }
+
+    @Test
+    fun infoResponseUsesLegacyDisplayFrameDurationAndThirtyFpsCap() {
+        val payload = AirPlayInfoResponder(
+            displayName = "AtrisCast",
+            deviceId = "02:11:22:33:44:55",
+            persistentId = "11111111-2222-3333-4444-555555555555",
+        ).createResponse()
+
+        val root = PropertyListParser.parse(payload) as NSDictionary
+        val displays = root.objectForKey("displays") as NSArray
+        val display = displays.array.first() as NSDictionary
+
+        assertEquals(1.0 / 60.0, (display.objectForKey("refreshRate") as NSNumber).doubleValue(), 0.0000001)
+        assertEquals(30L, (display.objectForKey("maxFPS") as NSNumber).longValue())
     }
 }
