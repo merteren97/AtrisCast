@@ -37,7 +37,8 @@ class MirrorCryptoTest {
         val predicted = byteArrayOf(0x41, 0x33)
         val payload = lengthPrefix(idr) + idr + lengthPrefix(predicted) + predicted
 
-        val parsed = MirrorCrypto.parseAvccFrame(payload) ?: fail("Expected a valid AVCC frame")
+        val parsed = MirrorCrypto.parseAvccFrame(payload)
+            ?: throw AssertionError("Expected a valid AVCC frame")
 
         assertEquals(listOf(5, 1), parsed.nalTypes)
         assertArrayEquals(
