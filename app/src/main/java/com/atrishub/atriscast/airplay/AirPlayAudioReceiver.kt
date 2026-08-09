@@ -2,7 +2,6 @@ package com.atrishub.atriscast.airplay
 
 import android.media.AudioAttributes
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
@@ -32,8 +31,8 @@ class AirPlayAudioReceiver(
     encryptionIv: ByteArray,
     private val codecType: Int,
     private val samplesPerFrame: Int,
-    private val remoteAddress: InetAddress,
-    private val remoteControlPort: Int,
+    @Suppress("unused") private val remoteAddress: InetAddress,
+    @Suppress("unused") private val remoteControlPort: Int,
     private val onMediaActivity: (Long) -> Unit,
     private val onStarted: () -> Unit,
     private val onError: (String) -> Unit,
@@ -181,6 +180,8 @@ class AirPlayAudioReceiver(
         private var audioTrack: AudioTrack? = null
 
         init {
+            // MPEG-4 AudioSpecificConfig for AAC-ELD, 44.1 kHz, stereo. AirPlay commonly uses
+            // 480-sample short frames; frameLengthFlag is set for the negotiated short-frame sizes.
             val frameLengthFlag = if (samplesPerFrame in SHORT_FRAME_SAMPLE_COUNTS) 1 else 0
             val audioSpecificConfig = byteArrayOf(
                 0xBA.toByte(),
@@ -288,7 +289,6 @@ class AirPlayAudioReceiver(
                 )
                 .setBufferSizeInBytes((minimumBuffer * 2).coerceAtLeast(16 * 1024))
                 .setTransferMode(AudioTrack.MODE_STREAM)
-                .setLegacyStreamType(AudioManager.STREAM_MUSIC)
                 .build()
             track.play()
             audioTrack = track
@@ -311,7 +311,7 @@ class AirPlayAudioReceiver(
 
     companion object {
         private const val CODEC_AAC_ELD = 8
-        private const val SAMPLE_RATE = 44_100L
+        private const val SAMPLE_RATE = 44_100
         private const val CHANNEL_COUNT = 2
         private const val RTP_VERSION = 2
         private const val RTP_PAYLOAD_TYPE = 96
