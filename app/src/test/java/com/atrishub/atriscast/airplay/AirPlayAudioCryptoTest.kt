@@ -31,4 +31,20 @@ class AirPlayAudioCryptoTest {
 
         assertArrayEquals(payload, AirPlayAudioCrypto.decryptPayload(key, iv, payload))
     }
+
+    @Test
+    fun airPlayAacEld480UsesExtendedObjectType39Config() {
+        assertArrayEquals(
+            byteArrayOf(0xF8.toByte(), 0xE8.toByte(), 0x50, 0x00),
+            AirPlayAacEldConfig.build(480),
+        )
+    }
+
+    @Test
+    fun aacEld512ClearsFrameLengthFlag() {
+        assertArrayEquals(
+            byteArrayOf(0xF8.toByte(), 0xE8.toByte(), 0x40, 0x00),
+            AirPlayAacEldConfig.build(512),
+        )
+    }
 }
