@@ -173,20 +173,18 @@ class AirPlayAudioReceiver(
     }
 
     private class AacEldDecoder(
-        private val samplesPerFrame: Int,
+        samplesPerFrame: Int,
         private val onStarted: () -> Unit,
     ) {
         private var codec: MediaCodec? = null
         private var audioTrack: AudioTrack? = null
 
         init {
-            // MPEG-4 AudioSpecificConfig for AAC-ELD, 44.1 kHz, stereo. AirPlay commonly uses
-            // 480-sample short frames; frameLengthFlag is set for the negotiated short-frame sizes.
-            val frameLengthFlag = if (samplesPerFrame in SHORT_FRAME_SAMPLE_COUNTS) 1 else 0
-            val audioSpecificConfig = byteArrayOf(
-                0xBA.toByte(),
-                (0x10 or (frameLengthFlag shl 2)).toByte(),
-            )
+            // AirPlay mirroring uses MPEG-4 ER AAC-ELD (Audio Object Type 39), not AAC-LD
+            // (Audio Object Type 23). AOT 39 is encoded through the MPEG-4 escape form in the
+            // AudioSpecificConfig. For the normal AirPlay format this produces F8 E8 50 00:
+            // 44.1 kHz, stereo, 480 samples/frame, no SBR, epConfig=0.
+            val audioSpecificConfig = AirPlayAacEldConfig.build(samplesPerFrame)
             val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, SAMPLE_RATE, CHANNEL_COUNT).apply {
                 setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectELD)
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_AAC_ACCESS_UNIT_SIZE)
@@ -323,7 +321,6 @@ class AirPlayAudioReceiver(
         private const val SOCKET_TIMEOUT_MS = 500
         private const val CODEC_INPUT_TIMEOUT_US = 5_000L
         private val NO_DATA_MARKER = byteArrayOf(0x00, 0x68, 0x34, 0x00)
-        private val SHORT_FRAME_SAMPLE_COUNTS = setOf(480, 240, 120)
 
         private fun bigEndianShort(bytes: ByteArray, offset: Int): Int =
             ((bytes[offset].toInt() and 0xFF) shl 8) or (bytes[offset + 1].toInt() and 0xFF)
@@ -336,6 +333,17 @@ class AirPlayAudioReceiver(
 
         private fun unsignedRtpDelta(base: Long, current: Long): Long =
             (current - base) and 0xFFFF_FFFFL
+    }
+}
+
+/** Builds the codec-specific bytes Android's AAC decoder needs for the AirPlay AAC-ELD stream. */
+internal object AirPlayAacEldConfig {
+    fun build(samplesPerFrame: Int): ByteArray = when (samplesPerFrame) {
+        // MPEG-4 ER AAC-ELD AOT 39, 44.1 kHz, stereo, frameLengthFlag=1, no SBR, epConfig=0.
+        480 -> byteArrayOf(0xF8.toByte(), 0xE8.toByte(), 0x50, 0x00)
+        // Same profile using the standard ELD 512-sample frame length.
+        512 -> byteArrayOf(0xF8.toByte(), 0xE8.toByte(), 0x40, 0x00)
+        else -> throw IllegalArgumentException("Unsupported AAC-ELD samples-per-frame: $samplesPerFrame")
     }
 }
 
