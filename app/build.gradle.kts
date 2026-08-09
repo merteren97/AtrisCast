@@ -29,6 +29,11 @@ val fairPlayOutputDir = layout.buildDirectory.dir("generated/fairplay/jniLibs")
 val fairPlayAssetsDir = layout.buildDirectory.dir("generated/fairplay/assets")
 val fairPlayCargoTargetDir = layout.buildDirectory.dir("fairplay-cargo-target")
 val skipFairPlayNative = providers.gradleProperty("skipFairPlayNative").orNull == "true"
+val fairPlayAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+val fairPlayLibraryName = "libatriscast_fairplay.so"
+
+fun expectedFairPlayLibraries(outputDir: File): List<File> =
+    fairPlayAbis.map { abi -> outputDir.resolve("$abi/$fairPlayLibraryName") }
 
 android {
     namespace = "com.atrishub.atriscast"
@@ -43,8 +48,8 @@ android {
         applicationId = "com.atrishub.atriscast"
         minSdk = 26
         targetSdk = 37
-        versionCode = 5
-        versionName = "0.1.0-alpha05"
+        versionCode = 6
+        versionName = "0.1.0-alpha06"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -75,11 +80,12 @@ android {
 
 val prepareFairPlayRust = tasks.register("prepareFairPlayRust") {
     description = "Fetch the pinned LGPL shairplay-rust source used by the FairPlay JNI bridge."
+    inputs.property("skipFairPlayNative", skipFairPlayNative)
     outputs.dir(fairPlayVendorDir)
     outputs.dir(fairPlayAssetsDir)
+    onlyIf("FairPlay native bridge is enabled") { !skipFairPlayNative }
 
     doLast {
-        if (skipFairPlayNative) return@doLast
         val sourceFile = fairPlayVendorDir.resolve("src/crypto/fairplay.rs")
         val upstreamLicense = fairPlayVendorDir.resolve("LICENSE")
         val assetsLicenseDir = fairPlayAssetsDir.get().asFile.resolve("licenses")
@@ -140,15 +146,19 @@ val prepareFairPlayRust = tasks.register("prepareFairPlayRust") {
 val buildFairPlayBridge = tasks.register("buildFairPlayBridge") {
     description = "Build the LGPL FairPlay decryptor as a replaceable Android shared library."
     dependsOn(prepareFairPlayRust)
+    inputs.property("skipFairPlayNative", skipFairPlayNative)
     outputs.dir(fairPlayOutputDir)
+    onlyIf("FairPlay native bridge is enabled") { !skipFairPlayNative }
+    outputs.upToDateWhen {
+        expectedFairPlayLibraries(fairPlayOutputDir.get().asFile).all { library ->
+            library.isFile && library.length() > 0L
+        }
+    }
 
     doLast {
         val outputDir = fairPlayOutputDir.get().asFile
+        outputDir.deleteRecursively()
         outputDir.mkdirs()
-        if (skipFairPlayNative) {
-            logger.warn("FairPlay native bridge skipped; the APK will negotiate AirPlay but cannot decrypt mirroring video.")
-            return@doLast
-        }
 
         runCheckedProcess(
             fairPlayBridgeDir,
@@ -165,6 +175,14 @@ val buildFairPlayBridge = tasks.register("buildFairPlayBridge") {
                 "CARGO_TARGET_DIR" to fairPlayCargoTargetDir.get().asFile.absolutePath,
             ),
         )
+
+        val missingLibraries = expectedFairPlayLibraries(outputDir).filterNot { library ->
+            library.isFile && library.length() > 0L
+        }
+        check(missingLibraries.isEmpty()) {
+            "FairPlay native bridge build completed without expected libraries: " +
+                missingLibraries.joinToString { it.relativeTo(outputDir).path }
+        }
     }
 }
 
