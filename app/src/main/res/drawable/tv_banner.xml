@@ -1,18 +1,18 @@
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item>
         <shape android:shape="rectangle">
-            <solid android:color="#0B111A" />
+            <gradient
+                android:angle="0"
+                android:startColor="#071014"
+                android:endColor="#0B161B" />
             <corners android:radius="12dp" />
+            <stroke android:width="1dp" android:color="#17343B" />
         </shape>
     </item>
-    <item android:left="92dp" android:right="92dp" android:top="22dp" android:bottom="22dp">
-        <vector
-            android:width="136dp"
-            android:height="136dp"
-            android:viewportWidth="108"
-            android:viewportHeight="108">
-            <path android:fillColor="#53DFC3" android:pathData="M22,73L43,36L54,55L65,36L86,73H72L65,60L58,73H50L43,60L36,73z" />
-            <path android:fillColor="#EAF7F4" android:pathData="M41,79h26v5h-26z" />
-        </vector>
-    </item>
+    <item
+        android:left="58dp"
+        android:right="58dp"
+        android:top="16dp"
+        android:bottom="16dp"
+        android:drawable="@drawable/ic_atriscast_brand_mark" />
 </layer-list>
