@@ -8,6 +8,11 @@ import javax.crypto.spec.SecretKeySpec
 
 /** Cryptographic helpers for the legacy AirPlay type-110 screen-mirroring stream. */
 object MirrorCrypto {
+    data class AvccFrame(
+        val annexB: ByteArray,
+        val nalTypes: List<Int>,
+    )
+
     private val startCode = byteArrayOf(0, 0, 0, 1)
 
     /**
@@ -51,10 +56,7 @@ object MirrorCrypto {
         val output = ByteArrayOutputStream(payload.size + 32)
         var offset = 0
         while (offset + 4 <= payload.size) {
-            val length = ((payload[offset].toInt() and 0xFF) shl 24) or
-                ((payload[offset + 1].toInt() and 0xFF) shl 16) or
-                ((payload[offset + 2].toInt() and 0xFF) shl 8) or
-                (payload[offset + 3].toInt() and 0xFF)
+            val length = bigEndianInt(payload, offset)
             offset += 4
             if (length <= 0 || offset + length > payload.size) break
             output.write(startCode)
@@ -64,7 +66,47 @@ object MirrorCrypto {
         return output.toByteArray()
     }
 
+    /**
+     * Strict AVCC parser used on live decrypted video packets.
+     *
+     * The legacy reference receiver rejects a decrypted packet when a NAL length runs past the
+     * payload or when the H.264 forbidden_zero_bit is set. Keeping this strict path separate from
+     * [avccToAnnexB] lets diagnostics distinguish "no keyframe yet" from "the AES output is not
+     * H.264 at all" instead of silently discarding malformed decrypted bytes forever.
+     */
+    fun parseAvccFrame(payload: ByteArray): AvccFrame? {
+        if (payload.size < 5) return null
+
+        val output = ByteArrayOutputStream(payload.size + 32)
+        val nalTypes = mutableListOf<Int>()
+        var offset = 0
+
+        while (offset < payload.size) {
+            if (offset + 4 > payload.size) return null
+            val length = bigEndianInt(payload, offset)
+            offset += 4
+            if (length <= 0 || offset + length > payload.size) return null
+
+            val header = payload[offset].toInt() and 0xFF
+            if ((header and 0x80) != 0) return null
+            nalTypes += header and 0x1F
+
+            output.write(startCode)
+            output.write(payload, offset, length)
+            offset += length
+        }
+
+        if (offset != payload.size || nalTypes.isEmpty()) return null
+        return AvccFrame(output.toByteArray(), nalTypes)
+    }
+
     fun withStartCode(nal: ByteArray): ByteArray = startCode + nal
+
+    private fun bigEndianInt(bytes: ByteArray, offset: Int): Int =
+        ((bytes[offset].toInt() and 0xFF) shl 24) or
+            ((bytes[offset + 1].toInt() and 0xFF) shl 16) or
+            ((bytes[offset + 2].toInt() and 0xFF) shl 8) or
+            (bytes[offset + 3].toInt() and 0xFF)
 
     private fun sha512(input: ByteArray): ByteArray = MessageDigest.getInstance("SHA-512").digest(input)
 }
