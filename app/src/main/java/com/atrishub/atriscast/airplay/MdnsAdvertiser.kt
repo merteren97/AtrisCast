@@ -6,12 +6,7 @@ import android.net.nsd.NsdServiceInfo
 import com.atrishub.atriscast.receiver.DeviceIdentity
 import java.util.concurrent.atomic.AtomicInteger
 
-/**
- * Publishes the Bonjour/DNS-SD records AirPlay senders use for discovery.
- *
- * This module deliberately owns discovery only. Pairing, FairPlay session handling,
- * RTP, decode and playback are separate future protocol layers.
- */
+/** Publishes the Bonjour/DNS-SD records AirPlay senders use for discovery. */
 class MdnsAdvertiser(
     context: Context,
     private val identity: DeviceIdentity,
@@ -29,7 +24,6 @@ class MdnsAdvertiser(
         if (started) return
         started = true
         registered.set(0)
-
         registerAirPlay(displayName)
         registerRaop(displayName)
     }
@@ -47,14 +41,14 @@ class MdnsAdvertiser(
     private fun registerAirPlay(displayName: String) {
         val info = NsdServiceInfo().apply {
             serviceName = displayName
-            serviceType = AIRPLAY_TYPE
-            port = AIRPLAY_PORT
+            serviceType = AirPlayProfile.AIRPLAY_TYPE
+            port = AirPlayProfile.AIRPLAY_PORT
             setAttribute("deviceid", identity.deviceId)
-            setAttribute("features", DISCOVERY_FEATURES)
-            setAttribute("flags", "0x4")
-            setAttribute("model", COMPAT_MODEL)
-            setAttribute("srcvers", COMPAT_SOURCE_VERSION)
-            setAttribute("vv", "2")
+            setAttribute("features", AirPlayProfile.DISCOVERY_FEATURES)
+            setAttribute("flags", AirPlayProfile.FLAGS)
+            setAttribute("model", AirPlayProfile.MODEL)
+            setAttribute("srcvers", AirPlayProfile.SOURCE_VERSION)
+            setAttribute("vv", AirPlayProfile.PROTOCOL_VERSION.toString())
             setAttribute("pi", identity.persistentId)
         }
 
@@ -67,8 +61,8 @@ class MdnsAdvertiser(
     private fun registerRaop(displayName: String) {
         val info = NsdServiceInfo().apply {
             serviceName = "${identity.raopPrefix}@$displayName"
-            serviceType = RAOP_TYPE
-            port = AIRPLAY_PORT
+            serviceType = AirPlayProfile.RAOP_TYPE
+            port = AirPlayProfile.AIRPLAY_PORT
             setAttribute("cn", "0,1,2,3")
             setAttribute("da", "true")
             setAttribute("et", "0,3,5")
@@ -76,8 +70,9 @@ class MdnsAdvertiser(
             setAttribute("sv", "false")
             setAttribute("tp", "UDP")
             setAttribute("vn", "65537")
-            setAttribute("vs", COMPAT_SOURCE_VERSION)
-            setAttribute("am", COMPAT_MODEL)
+            setAttribute("vs", AirPlayProfile.SOURCE_VERSION)
+            setAttribute("am", AirPlayProfile.MODEL)
+            setAttribute("sf", AirPlayProfile.FLAGS)
         }
 
         raopListener = listener("RAOP") {
@@ -99,16 +94,4 @@ class MdnsAdvertiser(
             override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit
             override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
         }
-
-    companion object {
-        const val AIRPLAY_PORT = 7000
-        private const val AIRPLAY_TYPE = "_airplay._tcp"
-        private const val RAOP_TYPE = "_raop._tcp"
-
-        // Compatibility advertisement for the discovery milestone. These values will become
-        // capability-driven as pairing/mirroring/audio support lands.
-        private const val DISCOVERY_FEATURES = "0x5A7FFFF7,0x1E"
-        private const val COMPAT_MODEL = "AppleTV5,3"
-        private const val COMPAT_SOURCE_VERSION = "220.68"
-    }
 }

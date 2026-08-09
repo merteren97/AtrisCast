@@ -9,14 +9,11 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Milestone-1 diagnostic RTSP server.
- *
- * It intentionally does not claim a complete AirPlay session. It proves that a sender which
- * discovered AtrisCast can reach TCP/7000, and captures the first protocol requests so the
- * pairing and mirroring layers can be implemented independently.
- */
+/** Local AirPlay RTSP endpoint used for discovery and session negotiation. */
 class AirPlaySocketServer(
+    displayName: String,
+    deviceId: String,
+    persistentId: String,
     private val onClient: (String) -> Unit,
     private val onRequest: (String) -> Unit,
     private val onClientClosed: () -> Unit,
@@ -25,9 +22,10 @@ class AirPlaySocketServer(
     private val running = AtomicBoolean(false)
     private val acceptExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val clientExecutor: ExecutorService = Executors.newCachedThreadPool()
+    private val infoResponder = AirPlayInfoResponder(displayName, deviceId, persistentId)
     @Volatile private var serverSocket: ServerSocket? = null
 
-    fun start(port: Int = MdnsAdvertiser.AIRPLAY_PORT): Result<Unit> {
+    fun start(port: Int = AirPlayProfile.AIRPLAY_PORT): Result<Unit> {
         if (!running.compareAndSet(false, true)) return Result.success(Unit)
 
         val server = try {
@@ -68,7 +66,7 @@ class AirPlaySocketServer(
     private fun handle(socket: Socket) {
         socket.use { client ->
             client.tcpNoDelay = true
-            client.soTimeout = 20_000
+            client.soTimeout = 30_000
             val remote = client.inetAddress?.hostAddress ?: "Unknown sender"
             onClient(remote)
 
@@ -83,7 +81,7 @@ class AirPlaySocketServer(
                     output.flush()
                 }
             } catch (_: java.net.SocketTimeoutException) {
-                // Diagnostic server closes idle handshakes cleanly.
+                // Idle negotiation sockets can be closed without turning the receiver into an error state.
             } catch (e: Exception) {
                 if (running.get()) onError("RTSP client error: ${e.message ?: e.javaClass.simpleName}")
             } finally {
@@ -93,22 +91,49 @@ class AirPlaySocketServer(
     }
 
     private fun responseFor(request: RtspRequest): ByteArray {
-        val cseq = request.cSeq?.let { "CSeq: $it\r\n" }.orEmpty()
-        return when (request.method.uppercase()) {
-            "OPTIONS" -> (
-                "RTSP/1.0 200 OK\r\n" +
-                    cseq +
-                    "Server: AtrisCast/0.1\r\n" +
-                    "Public: OPTIONS, GET, POST, SETUP, RECORD, SET_PARAMETER, GET_PARAMETER, TEARDOWN\r\n" +
-                    "Content-Length: 0\r\n\r\n"
-                ).toByteArray(Charsets.ISO_8859_1)
+        val method = request.method.uppercase()
+        val path = request.target.substringBefore('?')
 
-            else -> (
-                "RTSP/1.0 501 Not Implemented\r\n" +
-                    cseq +
-                    "Server: AtrisCast/0.1\r\n" +
-                    "Content-Length: 0\r\n\r\n"
-                ).toByteArray(Charsets.ISO_8859_1)
+        return when {
+            method == "OPTIONS" -> rtspResponse(
+                cSeq = request.cSeq,
+                extraHeaders = listOf(
+                    "Public" to "OPTIONS, GET, POST, SETUP, RECORD, SET_PARAMETER, GET_PARAMETER, TEARDOWN"
+                ),
+            )
+
+            method == "GET" && path.endsWith("/info") -> rtspResponse(
+                cSeq = request.cSeq,
+                contentType = "application/x-apple-binary-plist",
+                body = infoResponder.createResponse(),
+                extraHeaders = listOf("Audio-Jack-Status" to "connected; type=digital"),
+            )
+
+            else -> rtspResponse(
+                statusCode = 501,
+                reason = "Not Implemented",
+                cSeq = request.cSeq,
+            )
         }
+    }
+
+    private fun rtspResponse(
+        statusCode: Int = 200,
+        reason: String = "OK",
+        cSeq: String?,
+        contentType: String? = null,
+        body: ByteArray = ByteArray(0),
+        extraHeaders: List<Pair<String, String>> = emptyList(),
+    ): ByteArray {
+        val header = buildString {
+            append("RTSP/1.0 $statusCode $reason\r\n")
+            cSeq?.let { append("CSeq: $it\r\n") }
+            append("Server: AirTunes/${AirPlayProfile.SOURCE_VERSION}\r\n")
+            extraHeaders.forEach { (key, value) -> append("$key: $value\r\n") }
+            contentType?.let { append("Content-Type: $it\r\n") }
+            append("Content-Length: ${body.size}\r\n")
+            append("\r\n")
+        }.toByteArray(Charsets.ISO_8859_1)
+        return header + body
     }
 }

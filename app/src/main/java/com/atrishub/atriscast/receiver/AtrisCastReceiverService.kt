@@ -11,6 +11,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.atrishub.atriscast.MainActivity
 import com.atrishub.atriscast.R
+import com.atrishub.atriscast.airplay.AirPlayProfile
 import com.atrishub.atriscast.airplay.AirPlaySocketServer
 import com.atrishub.atriscast.airplay.MdnsAdvertiser
 
@@ -72,6 +73,9 @@ class AtrisCastReceiverService : Service() {
         acquireMulticastLock()
 
         val server = AirPlaySocketServer(
+            displayName = preferences.displayName,
+            deviceId = identity.deviceId,
+            persistentId = identity.persistentId,
             onClient = { remote ->
                 ReceiverRuntime.update { it.copy(phase = ReceiverPhase.CLIENT_CONNECTED, remoteAddress = remote) }
             },
@@ -83,7 +87,7 @@ class AtrisCastReceiverService : Service() {
         )
         val serverStart = server.start()
         if (serverStart.isFailure) {
-            val message = serverStart.exceptionOrNull()?.message ?: "Could not bind TCP 7000"
+            val message = serverStart.exceptionOrNull()?.message ?: "Could not bind TCP ${AirPlayProfile.AIRPLAY_PORT}"
             ReceiverRuntime.update { it.copy(phase = ReceiverPhase.ERROR, error = "RTSP server failed: $message") }
             server.stop()
             multicastLock?.let { if (it.isHeld) it.release() }
@@ -138,20 +142,26 @@ class AtrisCastReceiverService : Service() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 
-    private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
-        .setSmallIcon(R.drawable.ic_atriscast)
-        .setContentTitle(getString(R.string.notification_title))
-        .setContentText(getString(R.string.notification_text))
-        .setOngoing(true)
-        .setContentIntent(
-            PendingIntent.getActivity(
-                this,
-                0,
-                Intent(this, MainActivity::class.java),
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    private fun buildNotification(): android.app.Notification {
+        val turkish = preferences.languageCode == ReceiverPreferences.LANGUAGE_TURKISH
+        val title = if (turkish) "AtrisCast alıcısı etkin" else "AtrisCast receiver active"
+        val text = if (turkish) "Bu TV yerel ağda yayın için hazır." else "This TV is ready for local casting."
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_atriscast)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setOngoing(true)
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    this,
+                    0,
+                    Intent(this, MainActivity::class.java),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                )
             )
-        )
-        .build()
+            .build()
+    }
 
     companion object {
         private const val CHANNEL_ID = "atriscast_receiver"
@@ -163,6 +173,11 @@ class AtrisCastReceiverService : Service() {
 
         fun stop(context: Context) {
             context.stopService(Intent(context, AtrisCastReceiverService::class.java))
+        }
+
+        fun restart(context: Context) {
+            stop(context)
+            start(context)
         }
     }
 }
