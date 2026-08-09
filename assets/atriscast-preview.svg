@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">AtrisCast repository preview</title>
+  <desc id="desc">AtrisCast open-source AirPlay receiver for Google TV and Android TV.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#071014"/>
+      <stop offset="1" stop-color="#0B161B"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#12C7C1" stop-opacity=".24"/>
+      <stop offset="1" stop-color="#12C7C1" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="26"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="720" fill="url(#bg)"/>
+  <circle cx="250" cy="170" r="210" fill="url(#halo)" filter="url(#soft)"/>
+  <circle cx="955" cy="300" r="260" fill="url(#halo)" filter="url(#soft)" opacity=".65"/>
+
+  <!-- Brand mark -->
+  <g transform="translate(55 48) scale(.42)">
+    <path d="M255 95 H520 Q565 95 565 140 V300 Q565 335 530 335 H475"
+          fill="none" stroke="#202B33" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M210 188 A116 116 0 0 1 326 304" fill="none" stroke="#12C7C1" stroke-width="34" stroke-linecap="round"/>
+    <path d="M210 235 A69 69 0 0 1 279 304" fill="none" stroke="#12C7C1" stroke-width="34" stroke-linecap="round"/>
+    <path d="M210 282 A22 22 0 0 1 232 304" fill="none" stroke="#12C7C1" stroke-width="34" stroke-linecap="round"/>
+    <path d="M286 334 L428 103 Q444 77 470 77 Q497 77 513 103 L646 334 H576 L469 164 L363 334 Z" fill="#12C7C1"/>
+    <path d="M469 164 L576 334 H511 L438 221 Z" fill="#202B33"/>
+  </g>
+
+  <g font-family="Inter, Segoe UI, Arial, sans-serif">
+    <text x="70" y="286" font-size="78" font-weight="800" letter-spacing="-4" fill="#F4F7F8">Atris<tspan fill="#12C7C1">Cast</tspan></text>
+    <text x="72" y="332" font-size="24" font-weight="500" fill="#A8B5BB">Open-source AirPlay receiver for Google TV &amp; Android TV</text>
+    <rect x="72" y="358" width="78" height="4" rx="2" fill="#12C7C1"/>
+
+    <!-- Feature cards -->
+    <g transform="translate(70 397)">
+      <rect width="158" height="92" rx="18" fill="#0E1D22" stroke="#1E343B"/>
+      <circle cx="28" cy="28" r="14" fill="#0B3C3D"/>
+      <path d="M22 30a8 8 0 0 1 8 8M22 24a14 14 0 0 1 14 14M22 36h.1" fill="none" stroke="#12C7C1" stroke-width="3" stroke-linecap="round"/>
+      <text x="18" y="62" font-size="17" font-weight="700" fill="#12C7C1">Local-first</text>
+      <text x="18" y="82" font-size="12" fill="#91A1A8">No cloud dependency</text>
+    </g>
+    <g transform="translate(244 397)">
+      <rect width="158" height="92" rx="18" fill="#0E1D22" stroke="#1E343B"/>
+      <rect x="18" y="17" width="28" height="21" rx="4" fill="none" stroke="#12C7C1" stroke-width="3"/>
+      <text x="18" y="62" font-size="17" font-weight="700" fill="#12C7C1">TV-native</text>
+      <text x="18" y="82" font-size="12" fill="#91A1A8">Built for the big screen</text>
+    </g>
+    <g transform="translate(418 397)">
+      <rect width="158" height="92" rx="18" fill="#0E1D22" stroke="#1E343B"/>
+      <path d="M31 15l14 6v10c0 9-6 15-14 19-8-4-14-10-14-19V21z" fill="none" stroke="#12C7C1" stroke-width="3"/>
+      <text x="18" y="62" font-size="17" font-weight="700" fill="#12C7C1">Private LAN</text>
+      <text x="18" y="82" font-size="12" fill="#91A1A8">Media stays local</text>
+    </g>
+
+    <!-- Open source panel -->
+    <g transform="translate(70 514)">
+      <rect width="506" height="114" rx="20" fill="#0A1418" stroke="#263B42" stroke-width="1.4"/>
+      <text x="24" y="43" font-size="24" font-weight="700" fill="#12C7C1">Open Source</text>
+      <text x="24" y="70" font-size="14" fill="#B3C0C5">Apache License 2.0 · Contributions welcome</text>
+      <text x="24" y="94" font-size="13" fill="#7F9199">github.com/merteren97/AtrisCast</text>
+    </g>
+
+    <!-- TV mockup -->
+    <g transform="translate(620 72)">
+      <rect x="0" y="0" width="600" height="430" rx="20" fill="#10191E" stroke="#33474E" stroke-width="3"/>
+      <rect x="18" y="18" width="564" height="394" rx="14" fill="#071014"/>
+      <text x="42" y="58" font-size="20" font-weight="700" fill="#F4F7F8">Atris<tspan fill="#12C7C1">Cast</tspan></text>
+      <circle cx="520" cy="51" r="6" fill="#12C7C1"/>
+      <text x="538" y="57" font-size="14" fill="#9FB0B7">Ready</text>
+
+      <rect x="42" y="88" width="154" height="282" rx="15" fill="#0B171B"/>
+      <rect x="58" y="110" width="122" height="40" rx="10" fill="#0F292D"/>
+      <text x="76" y="136" font-size="15" font-weight="700" fill="#12C7C1">Receiver</text>
+      <text x="76" y="184" font-size="14" fill="#91A1A8">Network</text>
+      <text x="76" y="224" font-size="14" fill="#91A1A8">Diagnostics</text>
+      <text x="76" y="264" font-size="14" fill="#91A1A8">Settings</text>
+
+      <text x="226" y="118" font-size="17" font-weight="700" fill="#F4F7F8">Waiting for AirPlay sender</text>
+      <rect x="226" y="142" width="326" height="138" rx="16" fill="#0C2025" stroke="#173B41"/>
+      <circle cx="389" cy="205" r="46" fill="#0B3537"/>
+      <circle cx="389" cy="205" r="26" fill="#0D4748"/>
+      <path d="M365 208a24 24 0 0 1 24 24M365 195a37 37 0 0 1 37 37M365 182a50 50 0 0 1 50 50M365 231h1" fill="none" stroke="#12C7C1" stroke-width="5" stroke-linecap="round"/>
+      <text x="226" y="316" font-size="14" font-weight="700" fill="#DCE6E9">Receiver status</text>
+      <rect x="226" y="334" width="98" height="34" rx="10" fill="#0E292D"/>
+      <text x="243" y="356" font-size="12" fill="#12C7C1">Bonjour / mDNS</text>
+      <rect x="334" y="334" width="92" height="34" rx="10" fill="#0E292D"/>
+      <text x="351" y="356" font-size="12" fill="#12C7C1">RTSP :7000</text>
+      <rect x="436" y="334" width="116" height="34" rx="10" fill="#0E292D"/>
+      <text x="452" y="356" font-size="12" fill="#12C7C1">Local network</text>
+
+      <path d="M190 430h220l36 34H154z" fill="#1C292F"/>
+      <rect x="250" y="460" width="100" height="10" rx="5" fill="#263A41"/>
+    </g>
+
+    <!-- Sender device -->
+    <g transform="translate(780 510)">
+      <rect x="0" y="0" width="245" height="132" rx="24" fill="#0B1418" stroke="#31454C" stroke-width="2"/>
+      <text x="26" y="36" font-size="14" fill="#91A1A8">On the same network</text>
+      <text x="26" y="66" font-size="21" font-weight="700" fill="#F4F7F8">iPhone / iPad / Mac</text>
+      <path d="M28 102a21 21 0 0 1 21 21M28 91a32 32 0 0 1 32 32M28 80a43 43 0 0 1 43 43M28 122h1" fill="none" stroke="#12C7C1" stroke-width="4" stroke-linecap="round"/>
+      <text x="88" y="111" font-size="15" font-weight="700" fill="#12C7C1">AirPlay discovery</text>
+    </g>
+
+    <g transform="translate(1070 526)">
+      <rect width="150" height="92" rx="18" fill="#0E1D22" stroke="#1E343B"/>
+      <text x="20" y="36" font-size="13" fill="#91A1A8">Target</text>
+      <text x="20" y="61" font-size="17" font-weight="700" fill="#F4F7F8">Google TV</text>
+      <text x="20" y="81" font-size="13" fill="#12C7C1">Android TV</text>
+    </g>
+
+    <text x="620" y="681" font-size="14" fill="#6F848D">AtrisHub ecosystem · local-first · open source · early alpha</text>
+  </g>
+</svg>
