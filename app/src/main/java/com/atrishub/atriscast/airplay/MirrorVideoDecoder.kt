@@ -38,7 +38,7 @@ class MirrorVideoDecoder(
         if (width > 0) codedWidth = width
         if (height > 0) codedHeight = height
         rebuild(surfaceProvider()?.takeIf { it.isValid })
-        codec?.let(::flushPendingFrames)
+        codec?.let { flushPendingFrames(it) }
     }
 
     fun decode(annexB: ByteArray, presentationTimeUs: Long) {
@@ -51,7 +51,10 @@ class MirrorVideoDecoder(
             return
         }
 
-        flushPendingFrames(decoder)
+        if (!flushPendingFrames(decoder)) {
+            appendPendingFrame(annexB, presentationTimeUs)
+            return
+        }
         decodeIntoCodec(decoder, annexB, presentationTimeUs)
     }
 
@@ -84,6 +87,10 @@ class MirrorVideoDecoder(
         }
 
         if (pendingUntilSurface.isEmpty()) return
+        appendPendingFrame(annexB, presentationTimeUs)
+    }
+
+    private fun appendPendingFrame(annexB: ByteArray, presentationTimeUs: Long) {
         if (pendingUntilSurface.size >= MAX_PENDING_SURFACE_FRAMES) {
             // We can no longer guarantee an unbroken prediction chain. Drop the partial GOP and
             // wait for the next IDR rather than feeding MediaCodec frames with missing references.
@@ -94,18 +101,16 @@ class MirrorVideoDecoder(
         pendingUntilSurface.addLast(PendingFrame(annexB.clone(), presentationTimeUs))
     }
 
-    private fun flushPendingFrames(decoder: MediaCodec) {
-        if (pendingUntilSurface.isEmpty()) return
-
+    /** Returns true when every buffered frame has been submitted in original decode order. */
+    private fun flushPendingFrames(decoder: MediaCodec): Boolean {
         while (pendingUntilSurface.isNotEmpty()) {
             val pending = pendingUntilSurface.removeFirst()
             if (!decodeIntoCodec(decoder, pending.data, pending.presentationTimeUs)) {
-                // MediaCodec has no input slot right now. Keep the remaining frames bounded and let
-                // the normal stream drive another flush on the next packet.
                 pendingUntilSurface.addFirst(pending)
-                return
+                return false
             }
         }
+        return true
     }
 
     /** Returns false only when MediaCodec temporarily has no input buffer available. */
