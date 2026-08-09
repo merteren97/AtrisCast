@@ -1,6 +1,5 @@
 package com.atrishub.atriscast.ui
 
-import android.graphics.Color as AndroidColor
 import android.graphics.PixelFormat
 import android.view.Surface
 import android.view.SurfaceHolder
@@ -34,7 +33,10 @@ fun MirrorPlaybackScreen(state: ReceiverState) {
             factory = {
                 SurfaceView(context).apply {
                     keepScreenOn = true
-                    setBackgroundColor(AndroidColor.BLACK)
+                    // Do not install a View background over the dedicated SurfaceView layer. The
+                    // Compose parent already provides black before the first decoded frame, while
+                    // the Surface itself remains an unobstructed MediaCodec rendering target.
+                    setZOrderOnTop(false)
                     holder.setFormat(PixelFormat.OPAQUE)
                     holder.addCallback(object : SurfaceHolder.Callback {
                         private var attachedSurface: Surface? = null
@@ -61,7 +63,7 @@ fun MirrorPlaybackScreen(state: ReceiverState) {
         if (state.videoFramesRendered == 0L || state.videoError != null) {
             val startupDetail = state.videoError ?: when {
                 state.mediaBytesReceived <= 0L -> "Mirror connected • waiting for the first video packet"
-                else -> "Receiving ${formatMediaBytes(state.mediaBytesReceived)} • synchronizing H.264 decoder"
+                else -> "Receiving ${formatMediaBytes(state.mediaBytesReceived)} • decoding H.264"
             }
 
             Column(
