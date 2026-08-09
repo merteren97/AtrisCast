@@ -13,10 +13,14 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 
 class AirPlaySetupSessionTest {
-    private fun session(onMediaActivity: (Long) -> Unit = {}): AirPlaySetupSession =
+    private fun session(
+        onMediaActivity: (Long) -> Unit = {},
+        keyMessageProvider: () -> ByteArray? = { null },
+        sessionKeyDecryptor: (ByteArray, ByteArray) -> Result<ByteArray> = { _, _ -> Result.success(ByteArray(16)) },
+    ): AirPlaySetupSession =
         AirPlaySetupSession(
             remoteAddress = InetAddress.getLoopbackAddress(),
-            keyMessageProvider = { null },
+            keyMessageProvider = keyMessageProvider,
             surfaceProvider = { null },
             onMirrorStarted = {},
             onMediaActivity = onMediaActivity,
@@ -24,6 +28,7 @@ class AirPlaySetupSessionTest {
             onVideoFormat = {},
             onMirrorError = {},
             onMirrorStopped = {},
+            sessionKeyDecryptor = sessionKeyDecryptor,
         )
 
     @Test
@@ -66,9 +71,21 @@ class AirPlaySetupSessionTest {
 
     @Test
     fun audioSetupReturnsUdpDataAndControlPorts() {
-        session().use { session ->
-            val stream = NSDictionary().apply { put("type", 96L) }
-            val request = NSDictionary().apply { put("streams", NSArray(stream)) }
+        session(
+            keyMessageProvider = { ByteArray(164) { 0x33 } },
+            sessionKeyDecryptor = { _, _ -> Result.success(ByteArray(16) { 0x44 }) },
+        ).use { session ->
+            val stream = NSDictionary().apply {
+                put("type", 96L)
+                put("ct", 8L)
+                put("spf", 480L)
+                put("controlPort", 0L)
+            }
+            val request = NSDictionary().apply {
+                put("ekey", NSData(ByteArray(72) { 0x2A }))
+                put("eiv", NSData(ByteArray(16) { 0x11 }))
+                put("streams", NSArray(stream))
+            }
 
             val result = session.respond(BinaryPropertyListWriter.writeToArray(request))
             val response = PropertyListParser.parse(result.body) as NSDictionary
@@ -78,6 +95,8 @@ class AirPlaySetupSessionTest {
             assertEquals(96L, (audio.objectForKey("type") as NSNumber).longValue())
             assertTrue((audio.objectForKey("dataPort") as NSNumber).longValue() > 0L)
             assertTrue((audio.objectForKey("controlPort") as NSNumber).longValue() > 0L)
+            assertTrue(result.summary.contains("ct=8"))
+            assertTrue(result.summary.contains("spf=480"))
         }
     }
 }
