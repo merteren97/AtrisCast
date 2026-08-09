@@ -127,19 +127,36 @@ class AirPlaySetupSession(
         )
     }
 
+    /**
+     * Runs the legacy AirPlay NTP exchange.
+     *
+     * The first request contains only the transmit timestamp. After a valid response, subsequent
+     * requests echo the client's previous reference timestamp in bytes 8..15 and our local receive
+     * timestamp in bytes 16..23. This mirrors the stateful exchange used by established legacy
+     * receivers instead of repeatedly sending an all-zero originate/receive section.
+     */
     private fun openTimingChannel(senderPort: Int): Int {
         timingSocket?.let { return it.localPort }
         val socket = DatagramSocket(0).apply { soTimeout = 700 }
         timingSocket = socket
         ioExecutor.execute {
             val response = ByteArray(128)
+            var clientReferenceTimestamp: ByteArray? = null
+            var previousReceiveTimeMillis: Long? = null
+
             while (running.get() && !socket.isClosed) {
                 if (senderPort > 0) {
                     runCatching {
-                        val request = timingRequest()
+                        val request = timingRequest(clientReferenceTimestamp, previousReceiveTimeMillis)
                         socket.send(DatagramPacket(request, request.size, remoteAddress, senderPort))
+
                         val packet = DatagramPacket(response, response.size)
                         socket.receive(packet)
+                        val receivedAtMillis = System.currentTimeMillis()
+                        if (packet.length >= TIMING_RESPONSE_MIN_SIZE) {
+                            clientReferenceTimestamp = response.copyOfRange(24, 32)
+                            previousReceiveTimeMillis = receivedAtMillis
+                        }
                     }
                 }
                 try {
@@ -242,11 +259,19 @@ class AirPlaySetupSession(
         }
     }
 
-    private fun timingRequest(): ByteArray = ByteArray(32).also { packet ->
+    private fun timingRequest(
+        clientReferenceTimestamp: ByteArray?,
+        previousReceiveTimeMillis: Long?,
+    ): ByteArray = ByteArray(32).also { packet ->
         packet[0] = 0x80.toByte()
         packet[1] = 0xD2.toByte()
         packet[2] = 0x00
         packet[3] = 0x07
+
+        if (clientReferenceTimestamp?.size == 8) {
+            clientReferenceTimestamp.copyInto(packet, destinationOffset = 8)
+        }
+        previousReceiveTimeMillis?.let { putNtpTimestamp(packet, 16, it) }
         putNtpTimestamp(packet, 24, System.currentTimeMillis())
     }
 
@@ -275,7 +300,8 @@ class AirPlaySetupSession(
         private const val STREAM_AUDIO = 96
         private const val STREAM_BUFFERED_AUDIO = 103
         private const val STREAM_MIRROR = 110
-        private const val TIMING_INTERVAL_MS = 2_500L
+        private const val TIMING_INTERVAL_MS = 3_000L
+        private const val TIMING_RESPONSE_MIN_SIZE = 32
         private const val NTP_UNIX_EPOCH_OFFSET = 2_208_988_800L
     }
 }
