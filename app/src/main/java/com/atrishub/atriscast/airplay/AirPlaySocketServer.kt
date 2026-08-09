@@ -68,6 +68,7 @@ class AirPlaySocketServer(
             client.tcpNoDelay = true
             client.soTimeout = 30_000
             val remote = client.inetAddress?.hostAddress ?: "Unknown sender"
+            val fairPlay = FairPlayHandshake()
             onClient(remote)
 
             val input = BufferedInputStream(client.getInputStream())
@@ -76,8 +77,8 @@ class AirPlaySocketServer(
             try {
                 while (running.get() && !client.isClosed) {
                     val request = RtspRequestParser.read(input) ?: break
-                    onRequest("${request.method} ${request.target}")
-                    output.write(responseFor(request))
+                    onRequest(describeRequest(request))
+                    output.write(responseFor(request, fairPlay))
                     output.flush()
                 }
             } catch (_: java.net.SocketTimeoutException) {
@@ -90,26 +91,58 @@ class AirPlaySocketServer(
         }
     }
 
-    private fun responseFor(request: RtspRequest): ByteArray {
+    private fun responseFor(request: RtspRequest, fairPlay: FairPlayHandshake): ByteArray {
         val method = request.method.uppercase()
         val path = request.target.substringBefore('?')
+        val protocol = responseProtocol(request.protocol)
 
         return when {
-            method == "OPTIONS" -> rtspResponse(
+            method == "OPTIONS" -> response(
+                protocol = protocol,
                 cSeq = request.cSeq,
                 extraHeaders = listOf(
                     "Public" to "OPTIONS, GET, POST, SETUP, RECORD, SET_PARAMETER, GET_PARAMETER, TEARDOWN"
                 ),
             )
 
-            method == "GET" && path.endsWith("/info") -> rtspResponse(
+            method == "GET" && path.endsWith("/info") -> response(
+                protocol = protocol,
                 cSeq = request.cSeq,
                 contentType = "application/x-apple-binary-plist",
                 body = infoResponder.createResponse(),
                 extraHeaders = listOf("Audio-Jack-Status" to "connected; type=digital"),
             )
 
-            else -> rtspResponse(
+            method == "POST" && path.endsWith("/fp-setup") -> {
+                try {
+                    response(
+                        protocol = protocol,
+                        cSeq = request.cSeq,
+                        contentType = "application/octet-stream",
+                        body = fairPlay.respond(request.body),
+                    )
+                } catch (_: IllegalArgumentException) {
+                    response(
+                        protocol = protocol,
+                        statusCode = 400,
+                        reason = "Bad Request",
+                        cSeq = request.cSeq,
+                    )
+                }
+            }
+
+            method == "POST" && path.endsWith("/feedback") -> response(
+                protocol = protocol,
+                cSeq = request.cSeq,
+            )
+
+            method == "GET_PARAMETER" || method == "SET_PARAMETER" || method == "TEARDOWN" -> response(
+                protocol = protocol,
+                cSeq = request.cSeq,
+            )
+
+            else -> response(
+                protocol = protocol,
                 statusCode = 501,
                 reason = "Not Implemented",
                 cSeq = request.cSeq,
@@ -117,7 +150,28 @@ class AirPlaySocketServer(
         }
     }
 
-    private fun rtspResponse(
+    private fun describeRequest(request: RtspRequest): String {
+        val path = request.target.substringBefore('?')
+        if (request.method.equals("POST", true) && path.endsWith("/fp-setup")) {
+            val phase = when (request.body.size) {
+                FairPlayHandshake.PHASE1_SIZE -> "phase 1"
+                FairPlayHandshake.PHASE2_SIZE -> "phase 2"
+                else -> "${request.body.size} B"
+            }
+            val version = request.body.getOrNull(4)?.let { "v${it.toInt() and 0xFF}" }
+            return listOfNotNull("POST /fp-setup", phase, version).joinToString(" • ")
+        }
+        return "${request.method} ${request.target}"
+    }
+
+    private fun responseProtocol(value: String): String = when (value.uppercase()) {
+        "HTTP/1.1" -> "HTTP/1.1"
+        "HTTP/1.0" -> "HTTP/1.0"
+        else -> "RTSP/1.0"
+    }
+
+    private fun response(
+        protocol: String,
         statusCode: Int = 200,
         reason: String = "OK",
         cSeq: String?,
@@ -126,7 +180,7 @@ class AirPlaySocketServer(
         extraHeaders: List<Pair<String, String>> = emptyList(),
     ): ByteArray {
         val header = buildString {
-            append("RTSP/1.0 $statusCode $reason\r\n")
+            append("$protocol $statusCode $reason\r\n")
             cSeq?.let { append("CSeq: $it\r\n") }
             append("Server: AirTunes/${AirPlayProfile.SOURCE_VERSION}\r\n")
             extraHeaders.forEach { (key, value) -> append("$key: $value\r\n") }

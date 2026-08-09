@@ -15,8 +15,8 @@ android {
         applicationId = "com.atrishub.atriscast"
         minSdk = 26
         targetSdk = 37
-        versionCode = 2
-        versionName = "0.1.0-alpha02"
+        versionCode = 3
+        versionName = "0.1.0-alpha03"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
