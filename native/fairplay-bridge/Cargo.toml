@@ -1,0 +1,14 @@
+[package]
+name = "atriscast-fairplay"
+version = "0.1.0"
+edition = "2024"
+license = "LGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "atriscast_fairplay"
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = "0.21"
+shairplay = { path = "vendor/shairplay-rust", default-features = false }

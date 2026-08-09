@@ -1,7 +1,9 @@
 package com.atrishub.atriscast.airplay
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -59,11 +61,12 @@ class FairPlayHandshakeTest {
     }
 
     @Test
-    fun phase2EchoesTrailingTwentyBytesAndCompletesHandshake() {
+    fun phase2EchoesTrailingTwentyBytesAndRetainsKeyMessage() {
         val session = FairPlayHandshake()
         session.setup(phase1(0x03, 0))
+        val request = phase2(0x03)
 
-        val result = session.handshake(phase2(0x03))
+        val result = session.handshake(request)
 
         assertEquals(32, result.size)
         assertEquals(0x03, result[4].toInt() and 0xFF)
@@ -71,6 +74,20 @@ class FairPlayHandshakeTest {
             assertEquals(index, result[12 + index].toInt() and 0xFF)
         }
         assertTrue(session.phase2Complete)
+        assertArrayEquals(request, session.keyMessage)
+
+        request[20] = 0x7F
+        assertEquals(0, session.keyMessage?.get(20)?.toInt())
+    }
+
+    @Test
+    fun newPhase1ClearsPreviouslyRetainedKeyMessage() {
+        val session = FairPlayHandshake()
+        session.handshake(phase2(0x03))
+        session.setup(phase1(0x03, 1))
+
+        assertFalse(session.phase2Complete)
+        assertNull(session.keyMessage)
     }
 
     @Test(expected = IllegalArgumentException::class)

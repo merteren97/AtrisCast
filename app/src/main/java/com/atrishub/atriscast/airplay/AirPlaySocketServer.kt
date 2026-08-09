@@ -1,5 +1,6 @@
 package com.atrishub.atriscast.airplay
 
+import android.view.Surface
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.net.InetSocketAddress
@@ -14,10 +15,16 @@ class AirPlaySocketServer(
     displayName: String,
     deviceId: String,
     persistentId: String,
+    private val surfaceProvider: () -> Surface?,
     private val onClient: (String) -> Unit,
     private val onRequest: (String) -> Unit,
     private val onTransportReady: (String) -> Unit,
+    private val onMirrorStarted: () -> Unit,
     private val onMediaActivity: (Long) -> Unit,
+    private val onVideoFrameRendered: () -> Unit,
+    private val onVideoFormat: (String) -> Unit,
+    private val onMirrorError: (String) -> Unit,
+    private val onMirrorStopped: () -> Unit,
     private val onClientClosed: () -> Unit,
     private val onError: (String) -> Unit,
 ) {
@@ -73,7 +80,14 @@ class AirPlaySocketServer(
             val fairPlay = FairPlayHandshake()
             val setup = AirPlaySetupSession(
                 remoteAddress = client.inetAddress,
+                keyMessageProvider = { fairPlay.keyMessage },
+                surfaceProvider = surfaceProvider,
+                onMirrorStarted = onMirrorStarted,
                 onMediaActivity = onMediaActivity,
+                onVideoFrameRendered = onVideoFrameRendered,
+                onVideoFormat = onVideoFormat,
+                onMirrorError = onMirrorError,
+                onMirrorStopped = onMirrorStopped,
             )
             onClient(remote)
 
@@ -83,10 +97,10 @@ class AirPlaySocketServer(
             try {
                 while (running.get() && !client.isClosed) {
                     val request = RtspRequestParser.read(input) ?: break
-                    // SETUP only advances diagnostics after its binary-plist response was built successfully.
                     if (!request.method.equals("SETUP", true)) onRequest(describeRequest(request))
                     output.write(responseFor(request, fairPlay, setup))
                     output.flush()
+                    if (request.method.equals("TEARDOWN", true)) break
                 }
             } catch (_: java.net.SocketTimeoutException) {
                 // Idle negotiation sockets can close without turning the receiver into an error state.
@@ -155,7 +169,8 @@ class AirPlaySocketServer(
                         extraHeaders = listOf("Audio-Jack-Status" to "connected; type=digital"),
                     )
                 } catch (e: Exception) {
-                    onError("AirPlay SETUP rejected: ${e.message ?: e.javaClass.simpleName}")
+                    val message = "AirPlay SETUP rejected: ${e.message ?: e.javaClass.simpleName}"
+                    onMirrorError(message)
                     response(
                         protocol = protocol,
                         statusCode = 400,

@@ -52,7 +52,16 @@ class AtrisCastReceiverService : Service() {
 
     override fun onDestroy() {
         stopReceiver()
-        ReceiverRuntime.update { it.copy(phase = ReceiverPhase.STOPPED, remoteAddress = null) }
+        ReceiverRuntime.update {
+            it.copy(
+                phase = ReceiverPhase.STOPPED,
+                remoteAddress = null,
+                mirrorActive = false,
+                videoFramesRendered = 0L,
+                videoResolution = null,
+                videoError = null,
+            )
+        }
         super.onDestroy()
     }
 
@@ -76,6 +85,7 @@ class AtrisCastReceiverService : Service() {
             displayName = preferences.displayName,
             deviceId = identity.deviceId,
             persistentId = identity.persistentId,
+            surfaceProvider = MirrorSurfaceRegistry::current,
             onClient = { remote ->
                 ReceiverRuntime.update {
                     it.copy(
@@ -85,6 +95,10 @@ class AtrisCastReceiverService : Service() {
                         lastRequest = null,
                         protocolStage = ProtocolStage.DISCOVERY,
                         mediaBytesReceived = 0L,
+                        mirrorActive = false,
+                        videoFramesRendered = 0L,
+                        videoResolution = null,
+                        videoError = null,
                         error = null,
                     )
                 }
@@ -106,20 +120,72 @@ class AtrisCastReceiverService : Service() {
                     )
                 }
             },
+            onMirrorStarted = {
+                ReceiverRuntime.update {
+                    it.copy(
+                        mirrorActive = true,
+                        protocolStage = ProtocolStage.STREAMING,
+                        videoFramesRendered = 0L,
+                        videoResolution = null,
+                        videoError = null,
+                        lastRequest = "Mirror stream connected",
+                        error = null,
+                    )
+                }
+                bringMirrorUiToForeground()
+            },
             onMediaActivity = { bytes ->
                 ReceiverRuntime.update {
                     val total = it.mediaBytesReceived + bytes
                     it.copy(
                         protocolStage = ProtocolStage.STREAMING,
                         mediaBytesReceived = total,
-                        // Existing UI treats RECORD as the streaming stage; keep the live byte count visible too.
-                        lastRequest = "RECORD • media stream • $total B received",
+                        lastRequest = "RECORD • mirror stream • $total B received",
                         error = null,
                     )
                 }
             },
+            onVideoFrameRendered = {
+                ReceiverRuntime.update {
+                    it.copy(
+                        mirrorActive = true,
+                        videoFramesRendered = it.videoFramesRendered + 1,
+                        videoError = null,
+                    )
+                }
+            },
+            onVideoFormat = { format ->
+                ReceiverRuntime.update { it.copy(videoResolution = format, videoError = null) }
+            },
+            onMirrorError = { message ->
+                ReceiverRuntime.update {
+                    it.copy(
+                        mirrorActive = true,
+                        videoError = message,
+                        lastRequest = message,
+                    )
+                }
+            },
+            onMirrorStopped = {
+                ReceiverRuntime.update {
+                    it.copy(
+                        mirrorActive = false,
+                        videoFramesRendered = 0L,
+                        videoResolution = null,
+                    )
+                }
+            },
             onClientClosed = {
-                ReceiverRuntime.update { it.copy(phase = ReceiverPhase.ADVERTISING, remoteAddress = null) }
+                ReceiverRuntime.update {
+                    it.copy(
+                        phase = ReceiverPhase.ADVERTISING,
+                        remoteAddress = null,
+                        mirrorActive = false,
+                        videoFramesRendered = 0L,
+                        videoResolution = null,
+                        videoError = null,
+                    )
+                }
             },
             onError = { message -> ReceiverRuntime.update { it.copy(phase = ReceiverPhase.ERROR, error = message) } },
         )
@@ -150,6 +216,25 @@ class AtrisCastReceiverService : Service() {
             },
             onError = { message -> ReceiverRuntime.update { it.copy(phase = ReceiverPhase.ERROR, error = message) } },
         ).also { it.start(preferences.displayName) }
+    }
+
+    private fun bringMirrorUiToForeground() {
+        // A user explicitly selected this TV as the mirroring destination. If Android allows the
+        // foreground-service activity start, move the existing singleTop TV activity to the front.
+        // If the platform blocks background activity launches, the live state still switches to the
+        // mirror surface as soon as the user returns to AtrisCast.
+        runCatching {
+            startActivity(
+                Intent(this, MainActivity::class.java).apply {
+                    action = MainActivity.ACTION_SHOW_MIRROR
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                            Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                    )
+                }
+            )
+        }
     }
 
     private fun requestStage(request: String, current: ProtocolStage): ProtocolStage {

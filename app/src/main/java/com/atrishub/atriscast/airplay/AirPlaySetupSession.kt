@@ -1,5 +1,6 @@
 package com.atrishub.atriscast.airplay
 
+import android.view.Surface
 import com.dd.plist.BinaryPropertyListWriter
 import com.dd.plist.NSArray
 import com.dd.plist.NSData
@@ -16,16 +17,17 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Per-control-connection AirPlay SETUP state.
- *
- * This class intentionally handles only transport negotiation and socket ownership. The encrypted
- * FairPlay stream key is retained for the later media-crypto milestone; no fake decryption or
- * proprietary key material is used here.
- */
+/** Per-control-connection AirPlay SETUP transport and media state. */
 class AirPlaySetupSession(
     private val remoteAddress: InetAddress,
+    private val keyMessageProvider: () -> ByteArray?,
+    private val surfaceProvider: () -> Surface?,
+    private val onMirrorStarted: () -> Unit,
     private val onMediaActivity: (Long) -> Unit,
+    private val onVideoFrameRendered: () -> Unit,
+    private val onVideoFormat: (String) -> Unit,
+    private val onMirrorError: (String) -> Unit,
+    private val onMirrorStopped: () -> Unit,
 ) : Closeable {
     data class SetupResult(val body: ByteArray, val summary: String)
 
@@ -33,7 +35,7 @@ class AirPlaySetupSession(
     private val ioExecutor: ExecutorService = Executors.newCachedThreadPool()
 
     @Volatile private var timingSocket: DatagramSocket? = null
-    @Volatile private var mirrorServer: ServerSocket? = null
+    @Volatile private var mirrorReceiver: MirrorStreamReceiver? = null
     @Volatile private var audioDataSocket: DatagramSocket? = null
     @Volatile private var audioControlSocket: DatagramSocket? = null
     @Volatile private var bufferedAudioServer: ServerSocket? = null
@@ -77,7 +79,14 @@ class AirPlaySetupSession(
                 val type = (stream.objectForKey("type") as? NSNumber)?.longValue()?.toInt() ?: return@forEach
                 when (type) {
                     STREAM_MIRROR -> {
-                        val port = openMirrorDataChannel()
+                        val streamConnectionId = (
+                            stream.objectForKey("streamConnectionID") as? NSNumber
+                            )?.longValue() ?: (
+                            stream.objectForKey("streamConnectionId") as? NSNumber
+                            )?.longValue() ?: throw IllegalArgumentException(
+                            "mirror SETUP is missing streamConnectionID"
+                        )
+                        val port = openMirrorDataChannel(streamConnectionId)
                         responseStreams += NSDictionary().apply {
                             put("type", STREAM_MIRROR.toLong())
                             put("dataPort", port.toLong())
@@ -143,37 +152,33 @@ class AirPlaySetupSession(
         return socket.localPort
     }
 
-    private fun openMirrorDataChannel(): Int {
-        mirrorServer?.let { return it.localPort }
-        val server = ServerSocket(0).apply {
-            reuseAddress = true
-            soTimeout = 1_000
+    private fun openMirrorDataChannel(streamConnectionId: Long): Int {
+        mirrorReceiver?.let { return it.dataPort }
+        val encryptedKey = encryptedStreamKey
+            ?: throw IllegalStateException("mirror SETUP arrived before the encrypted FairPlay key")
+        val keyMessage = keyMessageProvider()
+            ?: throw IllegalStateException("mirror SETUP arrived before fp-setup phase 2 completed")
+        val fairPlayKey = FairPlayNative.decryptSessionKey(keyMessage, encryptedKey).getOrElse { cause ->
+            throw IllegalStateException(
+                "could not decrypt the AirPlay session key: ${cause.message ?: cause.javaClass.simpleName}",
+                cause,
+            )
         }
-        mirrorServer = server
-        ioExecutor.execute {
-            while (running.get() && !server.isClosed) {
-                try {
-                    server.accept().use { client ->
-                        client.soTimeout = 2_000
-                        val buffer = ByteArray(64 * 1024)
-                        while (running.get() && !client.isClosed) {
-                            val count = try {
-                                client.getInputStream().read(buffer)
-                            } catch (_: SocketTimeoutException) {
-                                continue
-                            }
-                            if (count <= 0) break
-                            onMediaActivity(count.toLong())
-                        }
-                    }
-                } catch (_: SocketTimeoutException) {
-                    // Periodically wake so close() can end the accept loop.
-                } catch (_: Exception) {
-                    if (!running.get()) return@execute
-                }
-            }
-        }
-        return server.localPort
+
+        val receiver = MirrorStreamReceiver(
+            fairPlayKey = fairPlayKey,
+            streamConnectionId = streamConnectionId,
+            surfaceProvider = surfaceProvider,
+            onStarted = onMirrorStarted,
+            onMediaActivity = onMediaActivity,
+            onFrameRendered = onVideoFrameRendered,
+            onFormat = onVideoFormat,
+            onError = onMirrorError,
+            onStopped = onMirrorStopped,
+        )
+        mirrorReceiver = receiver
+        receiver.start()
+        return receiver.dataPort
     }
 
     private fun openAudioChannels(): Pair<Int, Int> {
@@ -257,7 +262,7 @@ class AirPlaySetupSession(
     override fun close() {
         if (!running.compareAndSet(true, false)) return
         runCatching { timingSocket?.close() }
-        runCatching { mirrorServer?.close() }
+        runCatching { mirrorReceiver?.close() }
         runCatching { audioDataSocket?.close() }
         runCatching { audioControlSocket?.close() }
         runCatching { bufferedAudioServer?.close() }

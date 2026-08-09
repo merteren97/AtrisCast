@@ -27,5 +27,9 @@ data class ReceiverState(
     val lastRequest: String? = null,
     val protocolStage: ProtocolStage = ProtocolStage.DISCOVERY,
     val mediaBytesReceived: Long = 0L,
+    val mirrorActive: Boolean = false,
+    val videoFramesRendered: Long = 0L,
+    val videoResolution: String? = null,
+    val videoError: String? = null,
     val error: String? = null,
 )

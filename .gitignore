@@ -13,6 +13,8 @@
 .externalNativeBuild
 .cxx
 app/build/
+native/fairplay-bridge/target/
+native/fairplay-bridge/vendor/
 *.jks
 *.keystore
 keystore.properties

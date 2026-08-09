@@ -3,8 +3,8 @@ package com.atrishub.atriscast.airplay
 /**
  * Per-control-connection FairPlay setup state for the legacy AirPlay mirroring handshake.
  *
- * Only fp-setup phase 1/2 lives here. Stream-key decryption is intentionally NOT implemented
- * in this Apache-licensed module because the commonly used PlayFair native implementation is GPL.
+ * The Apache-licensed Kotlin layer handles fp-setup phase 1/2 and retains the phase-2 key message.
+ * Stream-key decryption is delegated to the separately licensed native bridge.
  *
  * Phase reply data and protocol behavior are adapted from PhairPlay (Apache-2.0), which in turn
  * documents RPiPlay/ShairPlay as protocol references.
@@ -14,6 +14,10 @@ class FairPlayHandshake {
         private set
 
     var phase2Complete: Boolean = false
+        private set
+
+    @Volatile
+    var keyMessage: ByteArray? = null
         private set
 
     fun respond(request: ByteArray): ByteArray = when (request.size) {
@@ -36,6 +40,7 @@ class FairPlayHandshake {
 
         negotiatedVersion = version
         phase2Complete = false
+        keyMessage = null
 
         return when (version) {
             0x03 -> REPLIES_V3[mode].copyOf()
@@ -62,6 +67,7 @@ class FairPlayHandshake {
             negotiatedVersion = version
         }
 
+        keyMessage = request.clone()
         phase2Complete = true
         return FP_HEADER.copyOf().also { it[4] = request[4] } +
             request.copyOfRange(PHASE2_ECHO_OFFSET, PHASE2_SIZE)

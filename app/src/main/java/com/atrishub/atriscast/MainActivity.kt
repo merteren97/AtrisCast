@@ -1,5 +1,6 @@
 package com.atrishub.atriscast
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -14,5 +15,14 @@ class MainActivity : ComponentActivity() {
                 AtrisCastApp()
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+    }
+
+    companion object {
+        const val ACTION_SHOW_MIRROR = "com.atrishub.atriscast.action.SHOW_MIRROR"
     }
 }
