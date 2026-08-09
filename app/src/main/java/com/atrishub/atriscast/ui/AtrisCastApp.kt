@@ -3,6 +3,7 @@ package com.atrishub.atriscast.ui
 import android.Manifest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -29,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -36,6 +38,7 @@ import androidx.tv.material3.Button
 import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.Text
 import com.atrishub.atriscast.BuildConfig
+import com.atrishub.atriscast.R
 import com.atrishub.atriscast.receiver.AtrisCastReceiverService
 import com.atrishub.atriscast.receiver.LocalNetworkPermission
 import com.atrishub.atriscast.receiver.ReceiverPreferences
@@ -129,13 +132,25 @@ private fun ProductRail(page: AppPage, text: UiStrings, state: ReceiverState, on
             .padding(horizontal = 22.dp, vertical = 28.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.Bottom) {
-                BrandBar(9.dp, 31.dp, Accent)
-                BrandBar(9.dp, 23.dp, AccentBlue)
-                BrandBar(9.dp, 16.dp, Color(0xFF4D8792))
+            Box(
+                modifier = Modifier
+                    .width(54.dp)
+                    .height(44.dp)
+                    .background(Color(0xFF0D171E), RoundedCornerShape(14.dp))
+                    .border(1.dp, Color(0xFF1B343C), RoundedCornerShape(14.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.ic_atriscast_brand_mark),
+                    contentDescription = "AtrisCast",
+                    modifier = Modifier.width(48.dp).height(34.dp),
+                )
             }
-            Spacer(Modifier.width(13.dp))
-            Text("AtrisCast", color = PrimaryText, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text("AtrisCast", color = PrimaryText, fontSize = 21.sp, fontWeight = FontWeight.SemiBold)
+                Text("AirPlay receiver", color = MutedText, fontSize = 9.sp)
+            }
         }
 
         Spacer(Modifier.height(52.dp))
@@ -160,11 +175,6 @@ private fun ProductRail(page: AppPage, text: UiStrings, state: ReceiverState, on
             }
         }
     }
-}
-
-@Composable
-private fun BrandBar(width: androidx.compose.ui.unit.Dp, height: androidx.compose.ui.unit.Dp, color: Color) {
-    Box(Modifier.width(width).height(height).background(color, RoundedCornerShape(8.dp)))
 }
 
 @Composable

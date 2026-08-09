@@ -22,7 +22,8 @@
         android:name=".AtrisCastApplication"
         android:allowBackup="false"
         android:banner="@drawable/tv_banner"
-        android:icon="@drawable/ic_atriscast"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:label="AtrisCast"
         android:supportsRtl="true"
         android:theme="@style/Theme.AtrisCast">
