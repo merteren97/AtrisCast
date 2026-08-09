@@ -25,8 +25,11 @@ object AirPlayProfile {
 
     const val DISPLAY_WIDTH: Long = 1920L
     const val DISPLAY_HEIGHT: Long = 1080L
-    const val DISPLAY_MAX_FPS: Long = 60L
-    const val DISPLAY_REFRESH_RATE = 60.0
+    const val DISPLAY_MAX_FPS: Long = 30L
+
+    // Legacy Apple TV profiles advertise the duration of one refresh, not the frequency in Hz.
+    // UxPlay sends 1 / 60 for a 60 Hz display; sending 60.0 here changes sender pacing semantics.
+    const val DISPLAY_REFRESH_RATE = 1.0 / 60.0
 
     fun supportsLegacyPairing(): Boolean = (FEATURES_LOW and (1L shl 27)) != 0L
 }
