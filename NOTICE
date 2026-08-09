@@ -1,0 +1,23 @@
+AtrisCast
+Copyright 2026 AtrisHub contributors
+
+AtrisCast is an independent open-source project from the AtrisHub ecosystem.
+AirPlay, iPhone, iPad, Mac and Apple TV are trademarks of Apple Inc.
+AtrisCast is not affiliated with, endorsed by, or sponsored by Apple Inc.
+
+The project does not include Apple proprietary keys, certificates, firmware,
+or copied proprietary Apple source code.
+
+Third-party notices
+-------------------
+
+The FairPlay fp-setup phase-response behavior in AtrisCast's Apache-licensed
+protocol layer is adapted from PhairPlay, licensed under the Apache License 2.0.
+PhairPlay documents RPiPlay and ShairPlay as protocol references.
+
+This build does not include the GPL PlayFair/libplayfair native stream-key
+decryption library. FairPlay setup negotiation and stream-key decryption remain
+separate components for licensing clarity.
+
+AtrisCast uses dd-plist for Apple property-list encoding. dd-plist is distributed
+under the MIT License.
