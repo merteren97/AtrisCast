@@ -1,6 +1,8 @@
 package com.atrishub.atriscast.airplay
 
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.fail
 import org.junit.Test
 
@@ -27,6 +29,36 @@ class MirrorCryptoTest {
         val result = MirrorCrypto.avccToAnnexB(payload)
 
         assertArrayEquals(byteArrayOf(0, 0, 0, 1) + valid, result)
+    }
+
+    @Test
+    fun strictAvccParserReportsNalTypesForValidDecryptedFrame() {
+        val idr = byteArrayOf(0x65, 0x11, 0x22)
+        val predicted = byteArrayOf(0x41, 0x33)
+        val payload = lengthPrefix(idr) + idr + lengthPrefix(predicted) + predicted
+
+        val parsed = MirrorCrypto.parseAvccFrame(payload) ?: fail("Expected a valid AVCC frame")
+
+        assertEquals(listOf(5, 1), parsed.nalTypes)
+        assertArrayEquals(
+            byteArrayOf(0, 0, 0, 1) + idr + byteArrayOf(0, 0, 0, 1) + predicted,
+            parsed.annexB,
+        )
+    }
+
+    @Test
+    fun strictAvccParserRejectsMalformedDecryptedFrame() {
+        val payload = byteArrayOf(0, 0, 0, 8, 0x65, 0x01)
+
+        assertNull(MirrorCrypto.parseAvccFrame(payload))
+    }
+
+    @Test
+    fun strictAvccParserRejectsForbiddenZeroBit() {
+        val invalidNal = byteArrayOf(0xE5.toByte(), 0x01)
+        val payload = lengthPrefix(invalidNal) + invalidNal
+
+        assertNull(MirrorCrypto.parseAvccFrame(payload))
     }
 
     @Test
