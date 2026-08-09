@@ -59,6 +59,11 @@ fun MirrorPlaybackScreen(state: ReceiverState) {
         )
 
         if (state.videoFramesRendered == 0L || state.videoError != null) {
+            val startupDetail = state.videoError ?: when {
+                state.mediaBytesReceived <= 0L -> "Mirror connected • waiting for the first video packet"
+                else -> "Receiving ${formatMediaBytes(state.mediaBytesReceived)} • synchronizing H.264 decoder"
+            }
+
             Column(
                 modifier = Modifier
                     .align(Alignment.Center)
@@ -73,7 +78,7 @@ fun MirrorPlaybackScreen(state: ReceiverState) {
                     fontSize = 18.sp,
                 )
                 Text(
-                    text = state.videoError ?: "Waiting for the first H.264 keyframe",
+                    text = startupDetail,
                     color = if (state.videoError == null) Color(0xFF95A6B2) else Color(0xFFFFA69E),
                     fontSize = 12.sp,
                 )
@@ -83,4 +88,10 @@ fun MirrorPlaybackScreen(state: ReceiverState) {
             }
         }
     }
+}
+
+private fun formatMediaBytes(bytes: Long): String = when {
+    bytes >= 1024L * 1024L -> String.format("%.1f MB AirPlay data", bytes / (1024.0 * 1024.0))
+    bytes >= 1024L -> String.format("%.1f KB AirPlay data", bytes / 1024.0)
+    else -> "$bytes B AirPlay data"
 }
