@@ -13,9 +13,11 @@ object MirrorCrypto {
     /**
      * Builds the continuous AES-128-CTR cipher used by the mirror video stream.
      *
-     * AirPlay first derives an effective AES key from the FairPlay-decrypted session key and the
-     * pair-verify ECDH secret. AtrisCast's current legacy profile does not negotiate pair-verify yet,
-     * so [ecdhSecret] is empty, but the SHA-512 derivation step must still be performed.
+     * The FairPlay-decrypted 16-byte session key is used directly when legacy pairing was not
+     * negotiated. If pairing did establish a 32-byte X25519 shared secret, the session key is first
+     * SHA-512 hashed together with that secret and truncated to 16 bytes before the stream key/IV
+     * derivation. AtrisCast currently advertises legacy pairing as disabled, so its normal path uses
+     * the FairPlay key directly.
      */
     fun createVideoCipher(
         fairPlayKey: ByteArray,
@@ -23,7 +25,15 @@ object MirrorCrypto {
         ecdhSecret: ByteArray = ByteArray(0),
     ): Cipher {
         require(fairPlayKey.size == 16) { "FairPlay session key must be 16 bytes" }
-        val effectiveKey = sha512(fairPlayKey + ecdhSecret).copyOf(16)
+        require(ecdhSecret.isEmpty() || ecdhSecret.size == 32) {
+            "AirPlay ECDH secret must be 32 bytes when pairing is active"
+        }
+
+        val effectiveKey = if (ecdhSecret.isEmpty()) {
+            fairPlayKey
+        } else {
+            sha512(fairPlayKey + ecdhSecret).copyOf(16)
+        }
         val unsignedId = java.lang.Long.toUnsignedString(streamConnectionId)
         val key = sha512(
             "AirPlayStreamKey$unsignedId".toByteArray(Charsets.US_ASCII) + effectiveKey
