@@ -1,7 +1,9 @@
 package com.atrishub.atriscast.airplay
 
 import android.media.MediaCodec
+import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.Build
 import android.view.Surface
 import java.nio.ByteBuffer
 import java.util.ArrayDeque
@@ -26,6 +28,10 @@ class MirrorVideoDecoder(
     private var codedWidth = AirPlayProfile.DISPLAY_WIDTH.toInt()
     private var codedHeight = AirPlayProfile.DISPLAY_HEIGHT.toInt()
     private var awaitingKeyframe = true
+
+    // This buffer is only for the short period before a visible Activity/overlay Surface exists.
+    // Decoder back-pressure is handled by retrying the same WorkItem in MirrorStreamReceiver instead
+    // of building a second multi-second frame queue here.
     private val pendingUntilSurface = ArrayDeque<PendingFrame>()
 
     fun configure(
@@ -53,18 +59,20 @@ class MirrorVideoDecoder(
         codec?.let { flushPendingFrames(it) }
     }
 
-    fun decode(annexB: ByteArray, presentationTimeUs: Long) {
+    /**
+     * Returns false only when the hardware decoder is temporarily back-pressured. The caller keeps
+     * that exact frame and retries it before taking another frame from the network queue, preserving
+     * H.264 reference order without accumulating hidden latency.
+     */
+    fun decode(annexB: ByteArray, presentationTimeUs: Long): Boolean {
         val decoder = ensureDecoderForCurrentSurface()
         if (decoder == null) {
             bufferUntilSurface(annexB, presentationTimeUs)
-            return
+            return true
         }
 
-        if (!flushPendingFrames(decoder)) {
-            appendPendingFrame(annexB, presentationTimeUs)
-            return
-        }
-        decodeIntoCodec(decoder, annexB, presentationTimeUs)
+        if (!flushPendingFrames(decoder)) return false
+        return decodeIntoCodec(decoder, annexB, presentationTimeUs)
     }
 
     /**
@@ -92,7 +100,7 @@ class MirrorVideoDecoder(
 
     /**
      * The playback Surface may appear after the initial SPS/PPS + IDR. Keep the GOP beginning at
-     * the most recent IDR so Compose/Activity scheduling cannot permanently lose decoder startup.
+     * the most recent IDR so Activity/overlay scheduling cannot permanently lose decoder startup.
      */
     private fun bufferUntilSurface(annexB: ByteArray, presentationTimeUs: Long) {
         val isIdr = containsNalType(annexB, NAL_TYPE_IDR)
@@ -115,7 +123,7 @@ class MirrorVideoDecoder(
         pendingUntilSurface.addLast(PendingFrame(annexB.clone(), presentationTimeUs))
     }
 
-    /** Returns true when every buffered frame has been submitted in original decode order. */
+    /** Returns true when every startup-buffered frame has been submitted in original decode order. */
     private fun flushPendingFrames(decoder: MediaCodec): Boolean {
         while (pendingUntilSurface.isNotEmpty()) {
             val pending = pendingUntilSurface.removeFirst()
@@ -149,7 +157,7 @@ class MirrorVideoDecoder(
         }
 
         return try {
-            val inputIndex = decoder.dequeueInputBuffer(INPUT_TIMEOUT_US)
+            val inputIndex = acquireInputBuffer(decoder)
             if (inputIndex < 0) return false
 
             val input = decoder.getInputBuffer(inputIndex)
@@ -177,6 +185,21 @@ class MirrorVideoDecoder(
         }
     }
 
+    /**
+     * Briefly drain output between input-buffer attempts. Some TV hardware codecs hold an input slot
+     * until a decoded output buffer has been released; retrying here avoids converting that momentary
+     * pressure into a frame drop or a second queue.
+     */
+    private fun acquireInputBuffer(decoder: MediaCodec): Int {
+        repeat(INPUT_RETRY_COUNT) { attempt ->
+            val timeoutUs = if (attempt == 0) 0L else INPUT_RETRY_TIMEOUT_US
+            val index = decoder.dequeueInputBuffer(timeoutUs)
+            if (index >= 0) return index
+            drain(decoder, OUTPUT_RETRY_WAIT_US)
+        }
+        return -1
+    }
+
     private fun ensureDecoderForCurrentSurface(): MediaCodec? {
         val liveSurface = surfaceProvider()?.takeIf { it.isValid }
         if (liveSurface !== configuredSurface) rebuild(liveSurface)
@@ -191,16 +214,28 @@ class MirrorVideoDecoder(
         if (surface == null || !surface.isValid) return
 
         try {
+            val decoder = MediaCodec.createDecoderByType(MIME_AVC)
+            codec = decoder
+            val lowLatencySupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && runCatching {
+                decoder.codecInfo
+                    .getCapabilitiesForType(MIME_AVC)
+                    .isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency)
+            }.getOrDefault(false)
+
             val format = MediaFormat.createVideoFormat(MIME_AVC, codedWidth, codedHeight).apply {
                 setByteBuffer("csd-0", ByteBuffer.wrap(MirrorCrypto.withStartCode(configSps)))
                 setByteBuffer("csd-1", ByteBuffer.wrap(MirrorCrypto.withStartCode(configPps)))
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_INPUT_SIZE)
+                setInteger(MediaFormat.KEY_PRIORITY, 0) // realtime playback priority
+                setInteger(MediaFormat.KEY_FRAME_RATE, AirPlayProfile.DISPLAY_MAX_FPS.toInt())
+                if (lowLatencySupported && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+                }
             }
-            codec = MediaCodec.createDecoderByType(MIME_AVC).apply {
-                configure(format, surface, null, 0)
-                start()
-                setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT)
-            }
+
+            decoder.configure(format, surface, null, 0)
+            decoder.start()
+            decoder.setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT)
             awaitingKeyframe = true
         } catch (e: Exception) {
             onError("Could not initialize H.264 decoder: ${e.message ?: e.javaClass.simpleName}")
@@ -288,7 +323,9 @@ class MirrorVideoDecoder(
         private const val MIME_AVC = "video/avc"
         private const val NAL_TYPE_IDR = 5
         private const val NAL_TYPE_SPS = 7
-        private const val INPUT_TIMEOUT_US = 5_000L
+        private const val INPUT_RETRY_COUNT = 4
+        private const val INPUT_RETRY_TIMEOUT_US = 2_000L
+        private const val OUTPUT_RETRY_WAIT_US = 1_000L
         private const val MAX_INPUT_SIZE = 4 * 1024 * 1024
         private const val MAX_PENDING_SURFACE_FRAMES = 120
     }
