@@ -12,6 +12,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
+import java.util.ArrayDeque
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -76,9 +77,9 @@ class AirPlayAudioReceiver(
             }
 
         val packetBuffer = ByteArray(MAX_PACKET_SIZE)
+        val sequenceDeduplicator = RtpSequenceDeduplicator()
         var baseRtpTimestamp: Long? = null
         var lastPresentationTimeUs = -1L
-        var lastSequence = -1
 
         try {
             while (running.get() && !dataSocket.isClosed) {
@@ -98,9 +99,12 @@ class AirPlayAudioReceiver(
                 val payloadType = packetBuffer[offset + 1].toInt() and 0x7F
                 if (version != RTP_VERSION || payloadType != RTP_PAYLOAD_TYPE) continue
 
+                // iOS deliberately repeats AAC-ELD RTP packets for loss resilience (the same
+                // sequence can reappear after one or two newer packets). Comparing only with the
+                // immediately previous sequence therefore decodes duplicate audio and produces
+                // audible echo/stutter. Keep a bounded recent-sequence window instead.
                 val sequence = bigEndianShort(packetBuffer, offset + 2)
-                if (sequence == lastSequence) continue
-                lastSequence = sequence
+                if (!sequenceDeduplicator.shouldAccept(sequence)) continue
 
                 val rtpTimestamp = bigEndianUnsignedInt(packetBuffer, offset + 4)
                 val encryptedPayload = packetBuffer.copyOfRange(
@@ -333,6 +337,32 @@ class AirPlayAudioReceiver(
 
         private fun unsignedRtpDelta(base: Long, current: Long): Long =
             (current - base) and 0xFFFF_FFFFL
+    }
+}
+
+/**
+ * AirPlay AAC-ELD packets are transmitted redundantly. Keep enough recent sequence numbers to
+ * reject non-consecutive duplicates while allowing the 16-bit RTP sequence space to wrap forever.
+ */
+internal class RtpSequenceDeduplicator(
+    private val capacity: Int = 256,
+) {
+    private val order = ArrayDeque<Int>(capacity)
+    private val seen = HashSet<Int>(capacity)
+
+    init {
+        require(capacity > 0) { "RTP deduplication capacity must be positive" }
+    }
+
+    fun shouldAccept(sequence: Int): Boolean {
+        val normalized = sequence and 0xFFFF
+        if (!seen.add(normalized)) return false
+
+        order.addLast(normalized)
+        if (order.size > capacity) {
+            seen.remove(order.removeFirst())
+        }
+        return true
     }
 }
 
