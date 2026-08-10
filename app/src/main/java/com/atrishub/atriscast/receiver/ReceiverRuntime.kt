@@ -4,6 +4,7 @@ import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 object ReceiverRuntime {
     private lateinit var appContext: Context
@@ -17,7 +18,10 @@ object ReceiverRuntime {
     fun context(): Context = appContext
 
     fun update(transform: (ReceiverState) -> ReceiverState) {
-        mutableState.value = transform(mutableState.value)
+        // AirPlay video, audio and control callbacks run on different worker threads. StateFlow's
+        // atomic update prevents one callback from overwriting fields published concurrently by
+        // another (for example an audio status update racing a video geometry/frame update).
+        mutableState.update(transform)
     }
 
     fun replace(state: ReceiverState) {
