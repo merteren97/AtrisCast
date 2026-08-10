@@ -7,7 +7,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.atrishub.atriscast.MainActivity
 import com.atrishub.atriscast.R
@@ -19,15 +21,33 @@ class AtrisCastReceiverService : Service() {
     private lateinit var preferences: ReceiverPreferences
     private lateinit var identity: DeviceIdentity
     private lateinit var networkInfo: NetworkInfoProvider
+    private lateinit var mirrorOverlay: MirrorOverlayController
+
     private var multicastLock: WifiManager.MulticastLock? = null
+    private var wifiPerformanceLock: WifiManager.WifiLock? = null
+    private var cpuWakeLock: PowerManager.WakeLock? = null
     private var advertiser: MdnsAdvertiser? = null
     private var socketServer: AirPlaySocketServer? = null
+    private var uiVisibilityListener: ((Boolean) -> Unit)? = null
 
     override fun onCreate() {
         super.onCreate()
         preferences = ReceiverPreferences(this)
         identity = DeviceIdentity(this)
         networkInfo = NetworkInfoProvider(this)
+        mirrorOverlay = MirrorOverlayController(applicationContext)
+
+        uiVisibilityListener = { visible ->
+            if (visible) {
+                // MainActivity now owns the preferred Surface. Remove the system overlay so it never
+                // sits above AtrisCast's own UI.
+                mirrorOverlay.hide()
+            } else if (ReceiverRuntime.state.value.mirrorActive) {
+                showMirrorSurfaceIfNeeded()
+            }
+        }
+        ReceiverUiVisibility.setListener(uiVisibilityListener)
+
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
     }
@@ -51,6 +71,8 @@ class AtrisCastReceiverService : Service() {
     }
 
     override fun onDestroy() {
+        ReceiverUiVisibility.setListener(null)
+        uiVisibilityListener = null
         stopReceiver()
         ReceiverRuntime.update {
             it.copy(
@@ -91,6 +113,7 @@ class AtrisCastReceiverService : Service() {
             persistentId = identity.persistentId,
             surfaceProvider = MirrorSurfaceRegistry::current,
             onClient = { remote ->
+                stopMirrorPresentation()
                 ReceiverRuntime.update {
                     it.copy(
                         phase = ReceiverPhase.CLIENT_CONNECTED,
@@ -142,7 +165,8 @@ class AtrisCastReceiverService : Service() {
                         error = null,
                     )
                 }
-                bringMirrorUiToForeground()
+                acquireStreamingPerformanceLocks()
+                showMirrorSurfaceIfNeeded()
             },
             onMediaActivity = { bytes ->
                 ReceiverRuntime.update {
@@ -168,6 +192,7 @@ class AtrisCastReceiverService : Service() {
                 ReceiverRuntime.update { it.copy(videoResolution = format, videoError = null) }
             },
             onVideoGeometry = { width, height ->
+                mirrorOverlay.updateGeometry(width, height)
                 ReceiverRuntime.update {
                     it.copy(
                         videoWidth = width.takeIf { value -> value > 0 },
@@ -185,6 +210,7 @@ class AtrisCastReceiverService : Service() {
                 }
             },
             onMirrorStopped = {
+                stopMirrorPresentation()
                 ReceiverRuntime.update {
                     it.copy(
                         mirrorActive = false,
@@ -213,6 +239,7 @@ class AtrisCastReceiverService : Service() {
                 }
             },
             onClientClosed = {
+                stopMirrorPresentation()
                 ReceiverRuntime.update {
                     it.copy(
                         phase = ReceiverPhase.ADVERTISING,
@@ -259,11 +286,19 @@ class AtrisCastReceiverService : Service() {
         ).also { it.start(preferences.displayName) }
     }
 
+    private fun showMirrorSurfaceIfNeeded() {
+        if (ReceiverUiVisibility.isVisible()) {
+            mirrorOverlay.hide()
+            return
+        }
+
+        // Android 10+ intentionally restricts background Activity launches. When the user granted
+        // the special overlay permission, render directly from the foreground receiver service;
+        // otherwise keep the old best-effort Activity start as a compatibility fallback.
+        if (!mirrorOverlay.show()) bringMirrorUiToForeground()
+    }
+
     private fun bringMirrorUiToForeground() {
-        // A user explicitly selected this TV as the mirroring destination. If Android allows the
-        // foreground-service activity start, move the existing singleTop TV activity to the front.
-        // If the platform blocks background activity launches, the live state still switches to the
-        // mirror surface as soon as the user returns to AtrisCast.
         runCatching {
             startActivity(
                 Intent(this, MainActivity::class.java).apply {
@@ -276,6 +311,47 @@ class AtrisCastReceiverService : Service() {
                 }
             )
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun acquireStreamingPerformanceLocks() {
+        val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val wifiLock = wifiPerformanceLock ?: wifi.createWifiLock(
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            },
+            "AtrisCast:AirPlayLowLatency",
+        ).apply {
+            setReferenceCounted(false)
+            wifiPerformanceLock = this
+        }
+        if (!wifiLock.isHeld) runCatching { wifiLock.acquire() }
+
+        val power = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val wakeLock = cpuWakeLock ?: power.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "AtrisCast:AirPlayMirror",
+        ).apply {
+            setReferenceCounted(false)
+            cpuWakeLock = this
+        }
+        if (!wakeLock.isHeld) {
+            runCatching { wakeLock.acquire(STREAM_WAKE_LOCK_TIMEOUT_MS) }
+        }
+    }
+
+    private fun releaseStreamingPerformanceLocks() {
+        wifiPerformanceLock?.let { lock -> runCatching { if (lock.isHeld) lock.release() } }
+        wifiPerformanceLock = null
+        cpuWakeLock?.let { lock -> runCatching { if (lock.isHeld) lock.release() } }
+        cpuWakeLock = null
+    }
+
+    private fun stopMirrorPresentation() {
+        mirrorOverlay.hide()
+        releaseStreamingPerformanceLocks()
     }
 
     private fun requestStage(request: String, current: ProtocolStage): ProtocolStage {
@@ -292,6 +368,7 @@ class AtrisCastReceiverService : Service() {
         if (candidate.ordinal > current.ordinal) candidate else current
 
     private fun stopReceiver() {
+        stopMirrorPresentation()
         advertiser?.stop()
         advertiser = null
         socketServer?.stop()
@@ -343,6 +420,7 @@ class AtrisCastReceiverService : Service() {
     companion object {
         private const val CHANNEL_ID = "atriscast_receiver"
         private const val NOTIFICATION_ID = 1001
+        private const val STREAM_WAKE_LOCK_TIMEOUT_MS = 6L * 60L * 60L * 1_000L
 
         fun start(context: Context) {
             context.startForegroundService(Intent(context, AtrisCastReceiverService::class.java))
