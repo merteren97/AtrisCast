@@ -1,6 +1,8 @@
 package com.atrishub.atriscast.airplay
 
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -46,5 +48,28 @@ class AirPlayAudioCryptoTest {
             byteArrayOf(0xF8.toByte(), 0xE8.toByte(), 0x40, 0x00),
             AirPlayAacEldConfig.build(512),
         )
+    }
+
+    @Test
+    fun redundantAacRtpPatternAcceptsEachSequenceOnlyOnce() {
+        val deduplicator = RtpSequenceDeduplicator(capacity = 8)
+        val pattern = intArrayOf(0, 0, 1, 0, 1, 2, 1, 2, 3)
+        val accepted = pattern.filter { deduplicator.shouldAccept(it) }.toIntArray()
+
+        assertArrayEquals(intArrayOf(0, 1, 2, 3), accepted)
+    }
+
+    @Test
+    fun sequenceWindowAllowsRtpWrapAfterOldEntriesExpire() {
+        val deduplicator = RtpSequenceDeduplicator(capacity = 4)
+
+        assertTrue(deduplicator.shouldAccept(0xFFFE))
+        assertTrue(deduplicator.shouldAccept(0xFFFF))
+        assertTrue(deduplicator.shouldAccept(0))
+        assertTrue(deduplicator.shouldAccept(1))
+        assertFalse(deduplicator.shouldAccept(0))
+
+        assertTrue(deduplicator.shouldAccept(2))
+        assertTrue(deduplicator.shouldAccept(0xFFFE))
     }
 }
