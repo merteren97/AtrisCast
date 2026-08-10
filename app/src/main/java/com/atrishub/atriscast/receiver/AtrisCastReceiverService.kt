@@ -16,6 +16,7 @@ import com.atrishub.atriscast.R
 import com.atrishub.atriscast.airplay.AirPlayProfile
 import com.atrishub.atriscast.airplay.AirPlaySocketServer
 import com.atrishub.atriscast.airplay.MdnsAdvertiser
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 class AtrisCastReceiverService : Service() {
@@ -35,6 +36,7 @@ class AtrisCastReceiverService : Service() {
     // Audio and video callbacks can exceed 100 events/second together. Publishing every packet/frame
     // into the Compose-observed StateFlow created avoidable allocation/recomposition pressure on the
     // same TV that is decoding H.264. Keep accurate atomic counters and expose telemetry at 4 Hz.
+    private val streamTelemetryEnabled = AtomicBoolean(false)
     private val mediaBytesCounter = AtomicLong(0L)
     private val renderedFramesCounter = AtomicLong(0L)
     private val lastTelemetryPublishNanos = AtomicLong(0L)
@@ -83,6 +85,7 @@ class AtrisCastReceiverService : Service() {
     override fun onDestroy() {
         ReceiverUiVisibility.setListener(null)
         uiVisibilityListener = null
+        streamTelemetryEnabled.set(false)
         stopReceiver()
         ReceiverRuntime.update {
             it.copy(
@@ -123,6 +126,7 @@ class AtrisCastReceiverService : Service() {
             persistentId = identity.persistentId,
             surfaceProvider = MirrorSurfaceRegistry::current,
             onClient = { remote ->
+                streamTelemetryEnabled.set(false)
                 stopMirrorPresentation()
                 resetStreamTelemetry()
                 ReceiverRuntime.update {
@@ -163,10 +167,13 @@ class AtrisCastReceiverService : Service() {
                 }
             },
             onMirrorStarted = {
+                resetStreamTelemetry()
+                streamTelemetryEnabled.set(true)
                 ReceiverRuntime.update {
                     it.copy(
                         mirrorActive = true,
                         protocolStage = ProtocolStage.STREAMING,
+                        mediaBytesReceived = 0L,
                         videoFramesRendered = 0L,
                         videoResolution = null,
                         videoWidth = null,
@@ -209,10 +216,13 @@ class AtrisCastReceiverService : Service() {
                 }
             },
             onMirrorStopped = {
+                streamTelemetryEnabled.set(false)
+                resetStreamTelemetry()
                 stopMirrorPresentation()
                 ReceiverRuntime.update {
                     it.copy(
                         mirrorActive = false,
+                        mediaBytesReceived = 0L,
                         videoFramesRendered = 0L,
                         videoResolution = null,
                         videoWidth = null,
@@ -238,12 +248,15 @@ class AtrisCastReceiverService : Service() {
                 }
             },
             onClientClosed = {
+                streamTelemetryEnabled.set(false)
+                resetStreamTelemetry()
                 stopMirrorPresentation()
                 ReceiverRuntime.update {
                     it.copy(
                         phase = ReceiverPhase.ADVERTISING,
                         remoteAddress = null,
                         mirrorActive = false,
+                        mediaBytesReceived = 0L,
                         videoFramesRendered = 0L,
                         videoResolution = null,
                         videoWidth = null,
@@ -292,6 +305,8 @@ class AtrisCastReceiverService : Service() {
     }
 
     private fun publishStreamTelemetry(force: Boolean = false) {
+        if (!streamTelemetryEnabled.get()) return
+
         val now = System.nanoTime()
         if (force) {
             lastTelemetryPublishNanos.set(now)
