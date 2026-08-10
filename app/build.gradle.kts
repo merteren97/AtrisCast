@@ -166,7 +166,7 @@ val buildFairPlayBridge = tasks.register("buildFairPlayBridge") {
                 "cargo", "ndk",
                 "-t", "arm64-v8a",
                 "-t", "armeabi-v7a",
-                "-t", "x86_64-linux-android",
+                "-t", "x86_64",
                 "-o", outputDir.absolutePath,
                 "build", "--release",
                 "--manifest-path", fairPlayBridgeDir.resolve("Cargo.toml").absolutePath,
