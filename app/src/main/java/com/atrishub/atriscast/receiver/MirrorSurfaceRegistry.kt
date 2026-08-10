@@ -24,12 +24,10 @@ object MirrorSurfaceRegistry {
     }
 
     fun current(): Surface? {
-        val activity = activitySurface?.takeIf { it.isValid }
-        val overlay = overlaySurface?.takeIf { it.isValid }
-        return if (ReceiverUiVisibility.isVisible()) {
-            activity ?: overlay
-        } else {
-            overlay ?: activity
-        }
+        // Once a background mirror overlay has been created, keep that Surface stable until the
+        // mirror session ends. Switching from overlay -> Activity merely because MainActivity became
+        // visible would force MediaCodec to rebuild mid-stream and can produce another visible hitch.
+        return overlaySurface?.takeIf { it.isValid }
+            ?: activitySurface?.takeIf { it.isValid }
     }
 }
