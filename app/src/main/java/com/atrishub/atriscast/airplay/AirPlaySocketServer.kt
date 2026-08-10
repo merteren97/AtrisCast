@@ -23,8 +23,11 @@ class AirPlaySocketServer(
     private val onMediaActivity: (Long) -> Unit,
     private val onVideoFrameRendered: () -> Unit,
     private val onVideoFormat: (String) -> Unit,
+    private val onVideoGeometry: (Int, Int) -> Unit,
     private val onMirrorError: (String) -> Unit,
     private val onMirrorStopped: () -> Unit,
+    private val onAudioStarted: () -> Unit,
+    private val onAudioError: (String) -> Unit,
     private val onClientClosed: () -> Unit,
     private val onError: (String) -> Unit,
 ) {
@@ -88,6 +91,9 @@ class AirPlaySocketServer(
                 onVideoFormat = onVideoFormat,
                 onMirrorError = onMirrorError,
                 onMirrorStopped = onMirrorStopped,
+                onVideoGeometry = onVideoGeometry,
+                onAudioStarted = onAudioStarted,
+                onAudioError = onAudioError,
             )
             onClient(remote)
 
@@ -170,7 +176,7 @@ class AirPlaySocketServer(
                     )
                 } catch (e: Exception) {
                     val message = "AirPlay SETUP rejected: ${e.message ?: e.javaClass.simpleName}"
-                    onMirrorError(message)
+                    if (message.contains("audio", ignoreCase = true)) onAudioError(message) else onMirrorError(message)
                     response(
                         protocol = protocol,
                         statusCode = 400,

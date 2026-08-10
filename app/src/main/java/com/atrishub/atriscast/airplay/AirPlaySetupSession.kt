@@ -28,6 +28,12 @@ class AirPlaySetupSession(
     private val onVideoFormat: (String) -> Unit,
     private val onMirrorError: (String) -> Unit,
     private val onMirrorStopped: () -> Unit,
+    private val onVideoGeometry: (Int, Int) -> Unit = { _, _ -> },
+    private val onAudioStarted: () -> Unit = {},
+    private val onAudioError: (String) -> Unit = {},
+    private val sessionKeyDecryptor: (ByteArray, ByteArray) -> Result<ByteArray> = { keyMessage, encryptedKey ->
+        FairPlayNative.decryptSessionKey(keyMessage, encryptedKey)
+    },
 ) : Closeable {
     data class SetupResult(val body: ByteArray, val summary: String)
 
@@ -36,8 +42,7 @@ class AirPlaySetupSession(
 
     @Volatile private var timingSocket: DatagramSocket? = null
     @Volatile private var mirrorReceiver: MirrorStreamReceiver? = null
-    @Volatile private var audioDataSocket: DatagramSocket? = null
-    @Volatile private var audioControlSocket: DatagramSocket? = null
+    @Volatile private var audioReceiver: AirPlayAudioReceiver? = null
     @Volatile private var bufferedAudioServer: ServerSocket? = null
 
     @Volatile var encryptedStreamKey: ByteArray? = null
@@ -95,13 +100,23 @@ class AirPlaySetupSession(
                         handled = true
                     }
                     STREAM_AUDIO -> {
-                        val (dataPort, controlPort) = openAudioChannels()
+                        val codecType = (stream.objectForKey("ct") as? NSNumber)?.longValue()?.toInt()
+                            ?: DEFAULT_AUDIO_CODEC
+                        val samplesPerFrame = (stream.objectForKey("spf") as? NSNumber)?.longValue()?.toInt()
+                            ?: DEFAULT_AUDIO_SPF
+                        val senderControlPort = (stream.objectForKey("controlPort") as? NSNumber)
+                            ?.longValue()?.toInt() ?: 0
+                        val (dataPort, controlPort) = openAudioChannels(
+                            codecType = codecType,
+                            samplesPerFrame = samplesPerFrame,
+                            senderControlPort = senderControlPort,
+                        )
                         responseStreams += NSDictionary().apply {
                             put("type", STREAM_AUDIO.toLong())
                             put("dataPort", dataPort.toLong())
                             put("controlPort", controlPort.toLong())
                         }
-                        summary += "audio UDP $dataPort/$controlPort"
+                        summary += "audio UDP $dataPort/$controlPort • ct=$codecType • spf=$samplesPerFrame"
                         handled = true
                     }
                     STREAM_BUFFERED_AUDIO -> {
@@ -110,7 +125,7 @@ class AirPlaySetupSession(
                             put("type", STREAM_BUFFERED_AUDIO.toLong())
                             put("dataPort", port.toLong())
                         }
-                        summary += "buffered TCP $port"
+                        summary += "buffered audio TCP $port"
                         handled = true
                     }
                 }
@@ -171,16 +186,7 @@ class AirPlaySetupSession(
 
     private fun openMirrorDataChannel(streamConnectionId: Long): Int {
         mirrorReceiver?.let { return it.dataPort }
-        val encryptedKey = encryptedStreamKey
-            ?: throw IllegalStateException("mirror SETUP arrived before the encrypted FairPlay key")
-        val keyMessage = keyMessageProvider()
-            ?: throw IllegalStateException("mirror SETUP arrived before fp-setup phase 2 completed")
-        val fairPlayKey = FairPlayNative.decryptSessionKey(keyMessage, encryptedKey).getOrElse { cause ->
-            throw IllegalStateException(
-                "could not decrypt the AirPlay session key: ${cause.message ?: cause.javaClass.simpleName}",
-                cause,
-            )
-        }
+        val fairPlayKey = requireFairPlaySessionKey()
 
         val receiver = MirrorStreamReceiver(
             fairPlayKey = fairPlayKey,
@@ -190,6 +196,7 @@ class AirPlaySetupSession(
             onMediaActivity = onMediaActivity,
             onFrameRendered = onVideoFrameRendered,
             onFormat = onVideoFormat,
+            onGeometry = onVideoGeometry,
             onError = onMirrorError,
             onStopped = onMirrorStopped,
         )
@@ -198,14 +205,43 @@ class AirPlaySetupSession(
         return receiver.dataPort
     }
 
-    private fun openAudioChannels(): Pair<Int, Int> {
-        if (audioDataSocket == null) {
-            audioDataSocket = DatagramSocket(0).also { startUdpDrain(it) }
+    private fun openAudioChannels(
+        codecType: Int,
+        samplesPerFrame: Int,
+        senderControlPort: Int,
+    ): Pair<Int, Int> {
+        audioReceiver?.let { return it.dataPort to it.controlPort }
+
+        val fairPlayKey = requireFairPlaySessionKey()
+        val iv = encryptionIv?.clone()
+            ?: throw IllegalStateException("audio SETUP arrived before the AirPlay encryption IV")
+        val receiver = AirPlayAudioReceiver(
+            fairPlayKey = fairPlayKey,
+            encryptionIv = iv,
+            codecType = codecType,
+            samplesPerFrame = samplesPerFrame,
+            remoteAddress = remoteAddress,
+            remoteControlPort = senderControlPort,
+            onMediaActivity = onMediaActivity,
+            onStarted = onAudioStarted,
+            onError = onAudioError,
+        )
+        audioReceiver = receiver
+        receiver.start()
+        return receiver.dataPort to receiver.controlPort
+    }
+
+    private fun requireFairPlaySessionKey(): ByteArray {
+        val encryptedKey = encryptedStreamKey
+            ?: throw IllegalStateException("media SETUP arrived before the encrypted FairPlay key")
+        val keyMessage = keyMessageProvider()
+            ?: throw IllegalStateException("media SETUP arrived before fp-setup phase 2 completed")
+        return sessionKeyDecryptor(keyMessage, encryptedKey).getOrElse { cause ->
+            throw IllegalStateException(
+                "could not decrypt the AirPlay session key: ${cause.message ?: cause.javaClass.simpleName}",
+                cause,
+            )
         }
-        if (audioControlSocket == null) {
-            audioControlSocket = DatagramSocket(0).also { startUdpDrain(it) }
-        }
-        return audioDataSocket!!.localPort to audioControlSocket!!.localPort
     }
 
     private fun openBufferedAudioChannel(): Int {
@@ -241,24 +277,6 @@ class AirPlaySetupSession(
         return server.localPort
     }
 
-    private fun startUdpDrain(socket: DatagramSocket) {
-        socket.soTimeout = 1_000
-        ioExecutor.execute {
-            val buffer = ByteArray(8 * 1024)
-            while (running.get() && !socket.isClosed) {
-                try {
-                    val packet = DatagramPacket(buffer, buffer.size)
-                    socket.receive(packet)
-                    if (packet.length > 0) onMediaActivity(packet.length.toLong())
-                } catch (_: SocketTimeoutException) {
-                    // Keep loop interruptible.
-                } catch (_: Exception) {
-                    if (!running.get()) return@execute
-                }
-            }
-        }
-    }
-
     private fun timingRequest(
         clientReferenceTimestamp: ByteArray?,
         previousReceiveTimeMillis: Long?,
@@ -288,8 +306,7 @@ class AirPlaySetupSession(
         if (!running.compareAndSet(true, false)) return
         runCatching { timingSocket?.close() }
         runCatching { mirrorReceiver?.close() }
-        runCatching { audioDataSocket?.close() }
-        runCatching { audioControlSocket?.close() }
+        runCatching { audioReceiver?.close() }
         runCatching { bufferedAudioServer?.close() }
         ioExecutor.shutdownNow()
     }
@@ -300,6 +317,8 @@ class AirPlaySetupSession(
         private const val STREAM_AUDIO = 96
         private const val STREAM_BUFFERED_AUDIO = 103
         private const val STREAM_MIRROR = 110
+        private const val DEFAULT_AUDIO_CODEC = 8
+        private const val DEFAULT_AUDIO_SPF = 480
         private const val TIMING_INTERVAL_MS = 3_000L
         private const val TIMING_RESPONSE_MIN_SIZE = 32
         private const val NTP_UNIX_EPOCH_OFFSET = 2_208_988_800L

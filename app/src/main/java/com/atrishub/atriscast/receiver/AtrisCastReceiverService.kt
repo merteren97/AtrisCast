@@ -59,7 +59,11 @@ class AtrisCastReceiverService : Service() {
                 mirrorActive = false,
                 videoFramesRendered = 0L,
                 videoResolution = null,
+                videoWidth = null,
+                videoHeight = null,
                 videoError = null,
+                audioActive = false,
+                audioError = null,
             )
         }
         super.onDestroy()
@@ -98,7 +102,11 @@ class AtrisCastReceiverService : Service() {
                         mirrorActive = false,
                         videoFramesRendered = 0L,
                         videoResolution = null,
+                        videoWidth = null,
+                        videoHeight = null,
                         videoError = null,
+                        audioActive = false,
+                        audioError = null,
                         error = null,
                     )
                 }
@@ -127,6 +135,8 @@ class AtrisCastReceiverService : Service() {
                         protocolStage = ProtocolStage.STREAMING,
                         videoFramesRendered = 0L,
                         videoResolution = null,
+                        videoWidth = null,
+                        videoHeight = null,
                         videoError = null,
                         lastRequest = "Mirror stream connected",
                         error = null,
@@ -140,7 +150,7 @@ class AtrisCastReceiverService : Service() {
                     it.copy(
                         protocolStage = ProtocolStage.STREAMING,
                         mediaBytesReceived = total,
-                        lastRequest = "RECORD • mirror stream • $total B received",
+                        lastRequest = "RECORD • AirPlay media • $total B received",
                         error = null,
                     )
                 }
@@ -157,6 +167,14 @@ class AtrisCastReceiverService : Service() {
             onVideoFormat = { format ->
                 ReceiverRuntime.update { it.copy(videoResolution = format, videoError = null) }
             },
+            onVideoGeometry = { width, height ->
+                ReceiverRuntime.update {
+                    it.copy(
+                        videoWidth = width.takeIf { value -> value > 0 },
+                        videoHeight = height.takeIf { value -> value > 0 },
+                    )
+                }
+            },
             onMirrorError = { message ->
                 ReceiverRuntime.update {
                     it.copy(
@@ -172,6 +190,25 @@ class AtrisCastReceiverService : Service() {
                         mirrorActive = false,
                         videoFramesRendered = 0L,
                         videoResolution = null,
+                        videoWidth = null,
+                        videoHeight = null,
+                    )
+                }
+            },
+            onAudioStarted = {
+                ReceiverRuntime.update {
+                    it.copy(
+                        audioActive = true,
+                        audioError = null,
+                    )
+                }
+            },
+            onAudioError = { message ->
+                ReceiverRuntime.update {
+                    it.copy(
+                        audioActive = false,
+                        audioError = message,
+                        lastRequest = message,
                     )
                 }
             },
@@ -183,7 +220,11 @@ class AtrisCastReceiverService : Service() {
                         mirrorActive = false,
                         videoFramesRendered = 0L,
                         videoResolution = null,
+                        videoWidth = null,
+                        videoHeight = null,
                         videoError = null,
+                        audioActive = false,
+                        audioError = null,
                     )
                 }
             },

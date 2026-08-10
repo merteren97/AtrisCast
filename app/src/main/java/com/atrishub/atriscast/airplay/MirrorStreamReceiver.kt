@@ -25,6 +25,7 @@ class MirrorStreamReceiver(
     private val onMediaActivity: (Long) -> Unit,
     private val onFrameRendered: () -> Unit,
     private val onFormat: (String) -> Unit,
+    private val onGeometry: (Int, Int) -> Unit,
     private val onError: (String) -> Unit,
     private val onStopped: () -> Unit,
 ) : Closeable {
@@ -34,9 +35,14 @@ class MirrorStreamReceiver(
             val pps: ByteArray,
             val codedWidth: Int,
             val codedHeight: Int,
+            val visibleWidth: Int,
+            val visibleHeight: Int,
         ) : WorkItem
 
-        data class Frame(val annexB: ByteArray) : WorkItem
+        data class Frame(
+            val annexB: ByteArray,
+            val senderPresentationTimeUs: Long,
+        ) : WorkItem
     }
 
     private val running = AtomicBoolean(true)
@@ -146,7 +152,12 @@ class MirrorStreamReceiver(
                             onError("AirPlay marked a keyframe packet, but decrypted H.264 contained no IDR NAL")
                             continue
                         }
-                        enqueue(WorkItem.Frame(parsed.annexB))
+                        enqueue(
+                            WorkItem.Frame(
+                                annexB = parsed.annexB,
+                                senderPresentationTimeUs = mirrorTimestampUs(header),
+                            )
+                        )
                     }
 
                     TYPE_CONFIG -> {
@@ -173,30 +184,50 @@ class MirrorStreamReceiver(
             onFormat = onFormat,
             onError = onError,
         )
-        var ptsUs = 0L
+        var senderEpochUs: Long? = null
+        var lastPtsUs = -1L
+        var fallbackPtsUs = 0L
         try {
             while (running.get() || queue.isNotEmpty()) {
                 val item = queue.poll(DECODER_POLL_MS, TimeUnit.MILLISECONDS)
                 when (item) {
-                    is WorkItem.Config -> decoder.configure(
-                        item.sps,
-                        item.pps,
-                        item.codedWidth,
-                        item.codedHeight,
-                    )
+                    is WorkItem.Config -> {
+                        onGeometry(item.visibleWidth, item.visibleHeight)
+                        onFormat(
+                            if (item.visibleWidth != item.codedWidth || item.visibleHeight != item.codedHeight) {
+                                "${item.visibleWidth}x${item.visibleHeight} • coded ${item.codedWidth}x${item.codedHeight}"
+                            } else {
+                                "${item.visibleWidth}x${item.visibleHeight}"
+                            }
+                        )
+                        decoder.configure(
+                            item.sps,
+                            item.pps,
+                            item.codedWidth,
+                            item.codedHeight,
+                        )
+                    }
                     is WorkItem.Frame -> {
                         if (resyncRequested.getAndSet(false)) decoder.requestResync()
+
+                        val senderTimeUs = item.senderPresentationTimeUs
+                        val relativePtsUs = if (senderTimeUs > 0L) {
+                            if (senderEpochUs == null) senderEpochUs = senderTimeUs
+                            (senderTimeUs - (senderEpochUs ?: senderTimeUs)).coerceAtLeast(0L)
+                        } else {
+                            fallbackPtsUs
+                        }
+                        val ptsUs = if (relativePtsUs > lastPtsUs) relativePtsUs else lastPtsUs + 1L
                         decoder.decode(item.annexB, ptsUs)
-                        ptsUs += FRAME_INTERVAL_US
+                        lastPtsUs = ptsUs
+                        fallbackPtsUs = ptsUs + FALLBACK_FRAME_INTERVAL_US
                     }
                     null -> Unit
                 }
 
                 // AirPlay is change-driven: a static iPhone screen may stop sending frames after an
                 // IDR. MediaCodec output becomes available asynchronously a few milliseconds later,
-                // so output MUST be drained independently of new input. The alpha08 decoder only
-                // drained after queueInputBuffer(), which could leave the last decoded picture
-                // trapped forever until the user touched the phone again.
+                // so output MUST be drained independently of new input.
                 decoder.pumpOutput(if (item == null) IDLE_OUTPUT_WAIT_US else 0L)
             }
 
@@ -214,7 +245,7 @@ class MirrorStreamReceiver(
         if (item is WorkItem.Config) {
             // A new SPS/PPS describes a new prediction/format epoch. Old queued frames are no longer
             // useful and may even belong to a different geometry. Preserve the config and wait for
-            // the IDR that AirPlay sends immediately after it, matching UxPlay's resync behaviour.
+            // the IDR that AirPlay sends immediately after it, matching established receivers.
             queue.clear()
             queue.offer(item)
             resyncRequested.set(true)
@@ -258,17 +289,25 @@ class MirrorStreamReceiver(
             val spsDimensions = H264SpsParser.parseDimensions(sps)
 
             // Header offsets 56/60 describe the visible AirPlay picture and can legitimately be a
-            // cropped width such as 498 pixels in portrait mode. MediaCodec should be initialized
-            // with the macroblock-coded SPS dimensions (e.g. 512x1088), then let the SPS crop/output
-            // format expose the visible rectangle (e.g. 498x1080).
+            // cropped width such as ~500 pixels in portrait mode. MediaCodec must be initialized
+            // with the macroblock-coded SPS dimensions, while the playback Surface uses the visible
+            // aspect ratio so portrait content is letterboxed rather than stretched to 16:9.
             val codedWidth = spsDimensions?.codedWidth ?: alignToMacroblock(headerWidth)
             val codedHeight = spsDimensions?.codedHeight ?: alignToMacroblock(headerHeight)
+            val visibleWidth = headerWidth.takeIf { it > 0 }
+                ?: spsDimensions?.visibleWidth
+                ?: codedWidth
+            val visibleHeight = headerHeight.takeIf { it > 0 }
+                ?: spsDimensions?.visibleHeight
+                ?: codedHeight
 
             WorkItem.Config(
                 sps = sps,
                 pps = pps,
                 codedWidth = codedWidth,
                 codedHeight = codedHeight,
+                visibleWidth = visibleWidth,
+                visibleHeight = visibleHeight,
             )
         }.getOrElse {
             onError("Could not parse H.264 SPS/PPS: ${it.message ?: it.javaClass.simpleName}")
@@ -284,6 +323,16 @@ class MirrorStreamReceiver(
         } else {
             fallback
         }
+    }
+
+    /** AirPlay mirror timestamps are NTP 32.32 values stored little-endian at header bytes 8..15. */
+    private fun mirrorTimestampUs(header: ByteArray): Long {
+        if (header.size < 16) return 0L
+        val raw = littleEndianLong(header, 8)
+        if (raw == 0L) return 0L
+        val seconds = raw ushr 32
+        val fraction = raw and 0xFFFF_FFFFL
+        return seconds * 1_000_000L + (fraction * 1_000_000L ushr 32)
     }
 
     private fun alignToMacroblock(value: Int): Int = ((value.coerceAtLeast(16) + 15) / 16) * 16
@@ -309,6 +358,14 @@ class MirrorStreamReceiver(
             ((bytes[offset + 2].toInt() and 0xFF) shl 16) or
             ((bytes[offset + 3].toInt() and 0xFF) shl 24)
 
+    private fun littleEndianLong(bytes: ByteArray, offset: Int): Long {
+        var value = 0L
+        for (index in 0 until 8) {
+            value = value or ((bytes[offset + index].toLong() and 0xFFL) shl (index * 8))
+        }
+        return value
+    }
+
     private fun bigEndianShort(bytes: ByteArray, offset: Int): Int =
         ((bytes[offset].toInt() and 0xFF) shl 8) or (bytes[offset + 1].toInt() and 0xFF)
 
@@ -331,7 +388,7 @@ class MirrorStreamReceiver(
         private const val MAX_PAYLOAD_SIZE = 8 * 1024 * 1024
         private const val QUEUE_CAPACITY = 90
         private const val SOCKET_TIMEOUT_MS = 2_000
-        private const val FRAME_INTERVAL_US = 1_000_000L / 60L
+        private const val FALLBACK_FRAME_INTERVAL_US = 1_000_000L / 30L
         private const val SURFACE_STARTUP_GRACE_MS = 1_500L
         private const val SURFACE_POLL_MS = 10L
         private const val DECODER_POLL_MS = 8L

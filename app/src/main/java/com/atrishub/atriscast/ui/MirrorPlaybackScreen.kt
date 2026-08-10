@@ -6,9 +6,12 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -27,15 +30,30 @@ import com.atrishub.atriscast.receiver.ReceiverState
 @Composable
 fun MirrorPlaybackScreen(state: ReceiverState) {
     val context = LocalContext.current
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+    BoxWithConstraints(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        val visibleWidth = state.videoWidth?.takeIf { it > 0 }
+        val visibleHeight = state.videoHeight?.takeIf { it > 0 }
+        val videoAspectRatio = if (visibleWidth != null && visibleHeight != null) {
+            visibleWidth.toFloat() / visibleHeight.toFloat()
+        } else {
+            null
+        }
+        val containerAspectRatio = if (maxHeight.value > 0f) maxWidth.value / maxHeight.value else 16f / 9f
+        val surfaceModifier = when {
+            videoAspectRatio == null -> Modifier.fillMaxSize()
+            videoAspectRatio >= containerAspectRatio -> Modifier.fillMaxWidth().aspectRatio(videoAspectRatio)
+            else -> Modifier.fillMaxHeight().aspectRatio(videoAspectRatio)
+        }
+
         AndroidView(
-            modifier = Modifier.fillMaxSize(),
+            modifier = surfaceModifier.align(Alignment.Center),
             factory = {
                 SurfaceView(context).apply {
                     keepScreenOn = true
-                    // Do not install a View background over the dedicated SurfaceView layer. The
-                    // Compose parent already provides black before the first decoded frame, while
-                    // the Surface itself remains an unobstructed MediaCodec rendering target.
+                    // Keep the dedicated Surface opaque and let the black parent provide the
+                    // letterbox/pillarbox bars. The AndroidView itself is constrained to the
+                    // sender's visible aspect ratio, so MediaCodec SCALE_TO_FIT no longer stretches
+                    // portrait iPhone frames to the TV's 16:9 dimensions.
                     setZOrderOnTop(false)
                     holder.setFormat(PixelFormat.OPAQUE)
                     holder.addCallback(object : SurfaceHolder.Callback {
@@ -86,6 +104,9 @@ fun MirrorPlaybackScreen(state: ReceiverState) {
                 )
                 state.videoResolution?.let {
                     Text(text = it, color = Color(0xFF42E8D2), fontSize = 11.sp)
+                }
+                state.audioError?.let {
+                    Text(text = "Audio: $it", color = Color(0xFFFFC27A), fontSize = 11.sp)
                 }
             }
         }

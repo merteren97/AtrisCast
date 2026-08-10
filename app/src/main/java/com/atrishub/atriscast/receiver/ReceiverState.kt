@@ -30,6 +30,10 @@ data class ReceiverState(
     val mirrorActive: Boolean = false,
     val videoFramesRendered: Long = 0L,
     val videoResolution: String? = null,
+    val videoWidth: Int? = null,
+    val videoHeight: Int? = null,
     val videoError: String? = null,
+    val audioActive: Boolean = false,
+    val audioError: String? = null,
     val error: String? = null,
 )

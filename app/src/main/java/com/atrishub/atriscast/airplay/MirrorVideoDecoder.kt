@@ -34,12 +34,22 @@ class MirrorVideoDecoder(
         width: Int = AirPlayProfile.DISPLAY_WIDTH.toInt(),
         height: Int = AirPlayProfile.DISPLAY_HEIGHT.toInt(),
     ) {
+        val nextWidth = width.takeIf { it > 0 } ?: codedWidth
+        val nextHeight = height.takeIf { it > 0 } ?: codedHeight
+        val sameCodecConfiguration = sps?.contentEquals(newSps) == true &&
+            pps?.contentEquals(newPps) == true &&
+            codedWidth == nextWidth && codedHeight == nextHeight
+
         sps = newSps.clone()
         pps = newPps.clone()
         parameterSets = MirrorCrypto.withStartCode(newSps) + MirrorCrypto.withStartCode(newPps)
-        if (width > 0) codedWidth = width
-        if (height > 0) codedHeight = height
-        rebuild(surfaceProvider()?.takeIf { it.isValid })
+        codedWidth = nextWidth
+        codedHeight = nextHeight
+
+        val liveSurface = surfaceProvider()?.takeIf { it.isValid }
+        if (!sameCodecConfiguration || codec == null || liveSurface !== configuredSurface) {
+            rebuild(liveSurface)
+        }
         codec?.let { flushPendingFrames(it) }
     }
 
@@ -129,9 +139,9 @@ class MirrorVideoDecoder(
             awaitingKeyframe = false
         }
 
-        // UxPlay prepends the unencrypted SPS/PPS packet to the encrypted IDR that immediately
-        // follows it. MediaCodec accepts csd-0/csd-1, but a number of Android TV hardware decoders
-        // are more reliable when parameter sets are also present in-band at the random access point.
+        // Established AirPlay receivers prepend the unencrypted SPS/PPS packet to the encrypted IDR
+        // that immediately follows it. MediaCodec accepts csd-0/csd-1, but Android TV hardware
+        // decoders are more reliable when parameter sets are also present in-band at random access.
         val sample = if (isIdr && !containsNalType(annexB, NAL_TYPE_SPS)) {
             (parameterSets ?: ByteArray(0)) + annexB
         } else {
@@ -204,7 +214,12 @@ class MirrorVideoDecoder(
         while (true) {
             when (val outputIndex = decoder.dequeueOutputBuffer(info, timeoutUs)) {
                 MediaCodec.INFO_TRY_AGAIN_LATER -> return
-                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> onFormat(describeOutputFormat(decoder.outputFormat))
+                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    // Android documents that the scaling mode may need to be re-applied after an
+                    // output-format change. Keeping this deterministic avoids device-specific jumps.
+                    runCatching { decoder.setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT) }
+                    onFormat(describeOutputFormat(decoder.outputFormat))
+                }
                 MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> Unit
                 else -> if (outputIndex >= 0) {
                     val codecConfig = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
