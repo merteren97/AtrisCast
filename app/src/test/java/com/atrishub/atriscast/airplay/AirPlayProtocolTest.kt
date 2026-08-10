@@ -35,7 +35,7 @@ class AirPlayProtocolTest {
     }
 
     @Test
-    fun infoResponseUsesLegacyDisplayFrameDurationAndThirtyFpsCap() {
+    fun infoResponseUsesLegacyDisplayFrameDurationAndSixtyFpsCap() {
         val payload = AirPlayInfoResponder(
             displayName = "AtrisCast",
             deviceId = "02:11:22:33:44:55",
@@ -47,6 +47,6 @@ class AirPlayProtocolTest {
         val display = displays.array.first() as NSDictionary
 
         assertEquals(1.0 / 60.0, (display.objectForKey("refreshRate") as NSNumber).doubleValue(), 0.0000001)
-        assertEquals(30L, (display.objectForKey("maxFPS") as NSNumber).longValue())
+        assertEquals(60L, (display.objectForKey("maxFPS") as NSNumber).longValue())
     }
 }
