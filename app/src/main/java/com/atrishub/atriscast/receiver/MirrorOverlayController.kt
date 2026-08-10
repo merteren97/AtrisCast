@@ -23,7 +23,10 @@ import kotlin.math.roundToInt
  * overlay is the deterministic TV-friendly fallback: it exists only for the active mirror session,
  * is not touchable/focusable, and is removed immediately when the session or service stops.
  */
-class MirrorOverlayController(context: Context) {
+class MirrorOverlayController(
+    context: Context,
+    private val onShowFailed: () -> Unit = {},
+) {
     private val appContext = context.applicationContext
     private val windowManager = appContext.getSystemService(WindowManager::class.java)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -119,6 +122,8 @@ class MirrorOverlayController(context: Context) {
         if (!added) {
             attachedSurface?.let(MirrorSurfaceRegistry::detachOverlay)
             attachedSurface = null
+            requestedVisible = false
+            onShowFailed()
             return
         }
 
