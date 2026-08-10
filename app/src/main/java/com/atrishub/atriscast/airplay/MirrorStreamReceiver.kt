@@ -1,5 +1,6 @@
 package com.atrishub.atriscast.airplay
 
+import android.os.Process
 import android.view.Surface
 import java.io.Closeable
 import java.io.InputStream
@@ -14,8 +15,9 @@ import javax.crypto.Cipher
 
 /**
  * Receives the AirPlay type-110 mirror TCP stream and feeds H.264 to Android MediaCodec.
- * Network/decryption and decoder work are deliberately separated so a slow decoder cannot stall the
- * sender's TCP socket and grow latency without bound.
+ * Network/decryption and decoder work are deliberately separated so a short decoder stall does not
+ * tear the sender's TCP stream. The queue is intentionally small and applies TCP back-pressure
+ * instead of silently accumulating seconds of latency or dropping predictive H.264 frames.
  */
 class MirrorStreamReceiver(
     fairPlayKey: ByteArray,
@@ -56,6 +58,11 @@ class MirrorStreamReceiver(
     private val cipher: Cipher = MirrorCrypto.createVideoCipher(fairPlayKey, streamConnectionId)
     @Volatile private var client: Socket? = null
 
+    // Reader-thread state used to suppress repeated AirPlay codec packets. iOS can resend identical
+    // SPS/PPS metadata (including pause/resume variants); treating every copy as a new codec epoch
+    // clears valid queued frames and creates visible hitches.
+    private var lastQueuedConfig: WorkItem.Config? = null
+
     val dataPort: Int
         get() = server.localPort
 
@@ -72,12 +79,11 @@ class MirrorStreamReceiver(
                     client = accepted
                     accepted.tcpNoDelay = true
                     accepted.soTimeout = SOCKET_TIMEOUT_MS
+                    runCatching { accepted.receiveBufferSize = SOCKET_RECEIVE_BUFFER_BYTES }
                     onStarted()
 
-                    // Compose creates the playback surface after the type-110 connection becomes
-                    // active. Give it a short head start, while MirrorVideoDecoder still keeps the
-                    // initial GOP if Activity/Surface scheduling takes longer on a particular TV.
-                    waitForRenderSurface()
+                    // Do not pause the sender while the Activity/overlay Surface is being created.
+                    // MirrorVideoDecoder keeps the latest IDR GOP until a valid Surface appears.
                     readClient(accepted)
                     break
                 } catch (_: java.net.SocketTimeoutException) {
@@ -89,18 +95,6 @@ class MirrorStreamReceiver(
         } finally {
             running.set(false)
             onStopped()
-        }
-    }
-
-    private fun waitForRenderSurface() {
-        val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(SURFACE_STARTUP_GRACE_MS)
-        while (running.get() && System.nanoTime() < deadlineNanos) {
-            if (surfaceProvider()?.isValid == true) return
-            try {
-                Thread.sleep(SURFACE_POLL_MS)
-            } catch (_: InterruptedException) {
-                return
-            }
         }
     }
 
@@ -131,8 +125,7 @@ class MirrorStreamReceiver(
                         }
 
                         // AES-CTR is continuous over the complete mirror stream. Every encrypted
-                        // payload must therefore advance this Cipher even when the frame is later
-                        // dropped for decoding/latency reasons.
+                        // payload must therefore advance this Cipher even when a frame is rejected.
                         val decrypted = cipher.update(payload) ?: ByteArray(0)
                         val parsed = MirrorCrypto.parseAvccFrame(decrypted)
                         if (parsed == null) {
@@ -178,6 +171,8 @@ class MirrorStreamReceiver(
     }
 
     private fun decoderLoop() {
+        runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY) }
+
         val decoder = MirrorVideoDecoder(
             surfaceProvider = surfaceProvider,
             onFrameRendered = onFrameRendered,
@@ -187,11 +182,25 @@ class MirrorStreamReceiver(
         var senderEpochUs: Long? = null
         var lastPtsUs = -1L
         var fallbackPtsUs = 0L
+        var retryFrame: WorkItem.Frame? = null
+
         try {
-            while (running.get() || queue.isNotEmpty()) {
-                val item = queue.poll(DECODER_POLL_MS, TimeUnit.MILLISECONDS)
+            while (running.get() || queue.isNotEmpty() || retryFrame != null) {
+                // MediaCodec back-pressure retries the exact same frame before consuming another
+                // network item. This preserves H.264 reference order and lets the small queue push
+                // back naturally through TCP instead of growing a hidden latency buffer.
+                val retrying = retryFrame != null
+                if (retrying && resyncRequested.get()) {
+                    retryFrame = null
+                    continue
+                }
+
+                val item: WorkItem? = retryFrame ?: queue.poll(DECODER_POLL_MS, TimeUnit.MILLISECONDS)
+                var decoderBusy = false
+
                 when (item) {
                     is WorkItem.Config -> {
+                        retryFrame = null
                         onGeometry(item.visibleWidth, item.visibleHeight)
                         onFormat(
                             if (item.visibleWidth != item.codedWidth || item.visibleHeight != item.codedHeight) {
@@ -207,8 +216,9 @@ class MirrorStreamReceiver(
                             item.codedHeight,
                         )
                     }
+
                     is WorkItem.Frame -> {
-                        if (resyncRequested.getAndSet(false)) decoder.requestResync()
+                        if (!retrying && resyncRequested.getAndSet(false)) decoder.requestResync()
 
                         val senderTimeUs = item.senderPresentationTimeUs
                         val relativePtsUs = if (senderTimeUs > 0L) {
@@ -218,17 +228,29 @@ class MirrorStreamReceiver(
                             fallbackPtsUs
                         }
                         val ptsUs = if (relativePtsUs > lastPtsUs) relativePtsUs else lastPtsUs + 1L
-                        decoder.decode(item.annexB, ptsUs)
-                        lastPtsUs = ptsUs
-                        fallbackPtsUs = ptsUs + FALLBACK_FRAME_INTERVAL_US
+
+                        if (decoder.decode(item.annexB, ptsUs)) {
+                            retryFrame = null
+                            lastPtsUs = ptsUs
+                            fallbackPtsUs = ptsUs + FALLBACK_FRAME_INTERVAL_US
+                        } else {
+                            retryFrame = item
+                            decoderBusy = true
+                        }
                     }
+
                     null -> Unit
                 }
 
                 // AirPlay is change-driven: a static iPhone screen may stop sending frames after an
                 // IDR. MediaCodec output becomes available asynchronously a few milliseconds later,
                 // so output MUST be drained independently of new input.
-                decoder.pumpOutput(if (item == null) IDLE_OUTPUT_WAIT_US else 0L)
+                val outputWaitUs = when {
+                    decoderBusy -> DECODER_BUSY_OUTPUT_WAIT_US
+                    item == null -> IDLE_OUTPUT_WAIT_US
+                    else -> 0L
+                }
+                decoder.pumpOutput(outputWaitUs)
             }
 
             // Give a final decoded picture a chance to reach the Surface when the sender closes
@@ -243,22 +265,53 @@ class MirrorStreamReceiver(
 
     private fun enqueue(item: WorkItem) {
         if (item is WorkItem.Config) {
-            // A new SPS/PPS describes a new prediction/format epoch. Old queued frames are no longer
-            // useful and may even belong to a different geometry. Preserve the config and wait for
-            // the IDR that AirPlay sends immediately after it, matching established receivers.
-            queue.clear()
-            queue.offer(item)
-            resyncRequested.set(true)
+            val previous = lastQueuedConfig
+            val sameCodec = previous?.let { hasSameCodecConfiguration(it, item) } == true
+            val sameGeometry = previous?.let { hasSameGeometry(it, item) } == true
+
+            // Exact duplicates are protocol chatter, not a new decode epoch. Ignoring them avoids the
+            // queue clear + keyframe wait that previously showed up as intermittent visual glitches.
+            if (sameCodec && sameGeometry) return
+            lastQueuedConfig = item
+
+            if (!sameCodec) {
+                // A genuinely new SPS/PPS describes a new prediction/format epoch. Old queued frames
+                // may belong to a different geometry/reference chain, so replace them with the new
+                // config and wait for the IDR that AirPlay sends immediately after it.
+                queue.clear()
+                offerWithBackpressure(item)
+                resyncRequested.set(true)
+                return
+            }
+
+            // Geometry-only metadata can update the output aspect ratio without destroying valid
+            // predictive frames or forcing the hardware decoder through a keyframe resync.
+            offerWithBackpressure(item)
             return
         }
 
-        if (queue.offer(item)) return
-        queue.poll()
-        queue.offer(item)
-        // A dropped predictive frame invalidates references that may follow it. Keep draining the
-        // socket to bound latency, but make the decoder ignore frames until the next IDR.
-        resyncRequested.set(true)
+        offerWithBackpressure(item)
     }
+
+    private fun offerWithBackpressure(item: WorkItem) {
+        while (running.get()) {
+            try {
+                if (queue.offer(item, QUEUE_OFFER_WAIT_MS, TimeUnit.MILLISECONDS)) return
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+        }
+    }
+
+    private fun hasSameCodecConfiguration(first: WorkItem.Config, second: WorkItem.Config): Boolean =
+        first.codedWidth == second.codedWidth &&
+            first.codedHeight == second.codedHeight &&
+            first.sps.contentEquals(second.sps) &&
+            first.pps.contentEquals(second.pps)
+
+    private fun hasSameGeometry(first: WorkItem.Config, second: WorkItem.Config): Boolean =
+        first.visibleWidth == second.visibleWidth && first.visibleHeight == second.visibleHeight
 
     /** Parses the AVCDecoderConfigurationRecord carried in payload type 1. */
     private fun parseAvcConfig(payload: ByteArray, header: ByteArray): WorkItem.Config? {
@@ -386,13 +439,14 @@ class MirrorStreamReceiver(
         private const val IDR_PACKET_FLAG = 0x10
         private const val NAL_TYPE_IDR = 5
         private const val MAX_PAYLOAD_SIZE = 8 * 1024 * 1024
-        private const val QUEUE_CAPACITY = 90
+        private const val QUEUE_CAPACITY = 12
+        private const val QUEUE_OFFER_WAIT_MS = 20L
         private const val SOCKET_TIMEOUT_MS = 2_000
-        private const val FALLBACK_FRAME_INTERVAL_US = 1_000_000L / 30L
-        private const val SURFACE_STARTUP_GRACE_MS = 1_500L
-        private const val SURFACE_POLL_MS = 10L
-        private const val DECODER_POLL_MS = 8L
-        private const val IDLE_OUTPUT_WAIT_US = 4_000L
+        private const val SOCKET_RECEIVE_BUFFER_BYTES = 512 * 1024
+        private const val FALLBACK_FRAME_INTERVAL_US = 1_000_000L / 60L
+        private const val DECODER_POLL_MS = 4L
+        private const val DECODER_BUSY_OUTPUT_WAIT_US = 2_000L
+        private const val IDLE_OUTPUT_WAIT_US = 2_000L
         private const val FINAL_OUTPUT_WAIT_US = 8_000L
         private const val FINAL_DRAIN_ATTEMPTS = 3
         private const val INVALID_VIDEO_DIAGNOSTIC_THRESHOLD = 3
