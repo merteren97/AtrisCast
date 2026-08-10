@@ -25,7 +25,10 @@ object AirPlayProfile {
 
     const val DISPLAY_WIDTH: Long = 1920L
     const val DISPLAY_HEIGHT: Long = 1080L
-    const val DISPLAY_MAX_FPS: Long = 30L
+
+    // This is an advisory ceiling. Modern iPhones/Google TV hardware can mirror at 60 fps while
+    // the sender is still free to choose a lower rate when the network or content does not need it.
+    const val DISPLAY_MAX_FPS: Long = 60L
 
     // Legacy Apple TV profiles advertise the duration of one refresh, not the frequency in Hz.
     // UxPlay sends 1 / 60 for a 60 Hz display; sending 60.0 here changes sender pacing semantics.
