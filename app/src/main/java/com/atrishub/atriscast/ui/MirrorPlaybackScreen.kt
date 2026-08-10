@@ -61,16 +61,16 @@ fun MirrorPlaybackScreen(state: ReceiverState) {
 
                         override fun surfaceCreated(holder: SurfaceHolder) {
                             attachedSurface = holder.surface
-                            MirrorSurfaceRegistry.attach(holder.surface)
+                            MirrorSurfaceRegistry.attachActivity(holder.surface)
                         }
 
                         override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
                             attachedSurface = holder.surface
-                            MirrorSurfaceRegistry.attach(holder.surface)
+                            MirrorSurfaceRegistry.attachActivity(holder.surface)
                         }
 
                         override fun surfaceDestroyed(holder: SurfaceHolder) {
-                            attachedSurface?.let(MirrorSurfaceRegistry::detach)
+                            attachedSurface?.let(MirrorSurfaceRegistry::detachActivity)
                             attachedSurface = null
                         }
                     })
