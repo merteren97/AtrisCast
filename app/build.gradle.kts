@@ -48,8 +48,8 @@ android {
         applicationId = "com.atrishub.atriscast"
         minSdk = 26
         targetSdk = 37
-        versionCode = 10
-        versionName = "0.1.0-alpha10"
+        versionCode = 11
+        versionName = "0.1.0-alpha11"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -166,7 +166,7 @@ val buildFairPlayBridge = tasks.register("buildFairPlayBridge") {
                 "cargo", "ndk",
                 "-t", "arm64-v8a",
                 "-t", "armeabi-v7a",
-                "-t", "x86_64",
+                "-t", "x86_64-linux-android",
                 "-o", outputDir.absolutePath,
                 "build", "--release",
                 "--manifest-path", fairPlayBridgeDir.resolve("Cargo.toml").absolutePath,
