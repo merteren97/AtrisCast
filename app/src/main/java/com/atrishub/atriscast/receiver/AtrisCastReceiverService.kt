@@ -38,11 +38,10 @@ class AtrisCastReceiverService : Service() {
         mirrorOverlay = MirrorOverlayController(applicationContext)
 
         uiVisibilityListener = { visible ->
-            if (visible) {
-                // MainActivity now owns the preferred Surface. Remove the system overlay so it never
-                // sits above AtrisCast's own UI.
-                mirrorOverlay.hide()
-            } else if (ReceiverRuntime.state.value.mirrorActive) {
+            // If the user leaves AtrisCast while mirroring, create the service-owned overlay. Once
+            // created, keep that Surface stable for the rest of the session even if MainActivity is
+            // later brought forward; switching MediaCodec targets mid-stream causes a visible hitch.
+            if (!visible && ReceiverRuntime.state.value.mirrorActive) {
                 showMirrorSurfaceIfNeeded()
             }
         }
