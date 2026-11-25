@@ -2,6 +2,7 @@ package com.atrishub.atriscast.airplay
 
 import android.os.Process
 import android.view.Surface
+import java.io.BufferedInputStream
 import java.io.Closeable
 import java.io.InputStream
 import java.net.ServerSocket
@@ -100,7 +101,7 @@ class MirrorStreamReceiver(
 
     private fun readClient(socket: Socket) {
         socket.use { connected ->
-            val input = connected.getInputStream()
+            val input = BufferedInputStream(connected.getInputStream(), SOCKET_STREAM_BUFFER_BYTES)
             val header = ByteArray(HEADER_SIZE)
             var invalidVideoPackets = 0
 
@@ -140,11 +141,6 @@ class MirrorStreamReceiver(
                         }
 
                         invalidVideoPackets = 0
-                        val senderMarksIdr = (header[5].toInt() and IDR_PACKET_FLAG) != 0
-                        if (senderMarksIdr && NAL_TYPE_IDR !in parsed.nalTypes) {
-                            onError("AirPlay marked a keyframe packet, but decrypted H.264 contained no IDR NAL")
-                            continue
-                        }
                         enqueue(
                             WorkItem.Frame(
                                 annexB = parsed.annexB,
@@ -275,12 +271,9 @@ class MirrorStreamReceiver(
             lastQueuedConfig = item
 
             if (!sameCodec) {
-                // A genuinely new SPS/PPS describes a new prediction/format epoch. Old queued frames
-                // may belong to a different geometry/reference chain, so replace them with the new
-                // config and wait for the IDR that AirPlay sends immediately after it.
-                queue.clear()
+                // Keep queued frames in exact sender order so pre-config frames still decode,
+                // and let MirrorVideoDecoder apply the updated SPS/PPS seamlessly at this boundary.
                 offerWithBackpressure(item)
-                resyncRequested.set(true)
                 return
             }
 
@@ -436,12 +429,11 @@ class MirrorStreamReceiver(
         private const val TYPE_CONFIG = 1
         private const val TYPE_KEEPALIVE = 2
         private const val TYPE_REPORT = 5
-        private const val IDR_PACKET_FLAG = 0x10
-        private const val NAL_TYPE_IDR = 5
         private const val MAX_PAYLOAD_SIZE = 8 * 1024 * 1024
-        private const val QUEUE_CAPACITY = 12
-        private const val QUEUE_OFFER_WAIT_MS = 20L
+        private const val QUEUE_CAPACITY = 48
+        private const val QUEUE_OFFER_WAIT_MS = 10L
         private const val SOCKET_TIMEOUT_MS = 2_000
+        private const val SOCKET_STREAM_BUFFER_BYTES = 64 * 1024
         private const val SOCKET_RECEIVE_BUFFER_BYTES = 512 * 1024
         private const val FALLBACK_FRAME_INTERVAL_US = 1_000_000L / 60L
         private const val DECODER_POLL_MS = 4L

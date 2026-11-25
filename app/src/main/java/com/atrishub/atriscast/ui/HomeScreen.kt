@@ -5,14 +5,18 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -20,110 +24,269 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.tv.material3.Button
-import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.Text
 import com.atrishub.atriscast.receiver.LocalNetworkPermission
+import com.atrishub.atriscast.receiver.OverlayPermissionHelper
 import com.atrishub.atriscast.receiver.ReceiverPhase
 import com.atrishub.atriscast.receiver.ReceiverState
 
 @Composable
-internal fun HomeScreen(state: ReceiverState, text: UiStrings, onPermission: () -> Unit, onRestart: () -> Unit) {
-    val stage = protocolStage(state.lastRequest)
+internal fun HomeScreen(
+    state: ReceiverState,
+    text: UiStrings,
+    canDrawOverlays: Boolean,
+    onPermission: () -> Unit,
+    onEnableOverlay: () -> Unit,
+    onOpenDiagnostics: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onRestart: () -> Unit,
+) {
+    val context = LocalContext.current
+    val stage = toUiStage(state.protocolStage)
+    val needsLocalNetwork = !LocalNetworkPermission.isGranted(context) && LocalNetworkPermission.isRequired()
+    val overlaySettingsSupported = OverlayPermissionHelper.canOpenOverlaySettings(context)
 
-    Box(
+    Column(
         modifier = Modifier
-            .fillMaxWidth()
-            .height(420.dp)
-            .background(
-                Brush.linearGradient(listOf(Color(0xFF102029), Color(0xFF0D171F), Color(0xFF0C131A))),
-                RoundedCornerShape(28.dp),
-            )
-            .border(1.dp, Color(0xFF20343D), RoundedCornerShape(28.dp))
-            .padding(34.dp)
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Row(modifier = Modifier.fillMaxWidth().fillMaxHeight()) {
-            Column(modifier = Modifier.weight(1.35f).fillMaxHeight()) {
-                Text(
-                    heroEyebrow(state.phase, text),
-                    color = phaseColor(state.phase),
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.linearGradient(
+                        listOf(Color(0xFF11232E), Color(0xFF0E1821), Color(0xFF0C141C))
+                    ),
+                    RoundedCornerShape(20.dp),
                 )
-                Spacer(Modifier.height(15.dp))
-                Text(heroTitle(state.phase, text), color = PrimaryText, fontSize = 35.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(12.dp))
-                Text(heroBody(state.phase, text), color = SecondaryText, fontSize = 16.sp, lineHeight = 24.sp)
+                .border(1.dp, BorderStrong, RoundedCornerShape(20.dp))
+                .padding(horizontal = 22.dp, vertical = 16.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1.45f)) {
+                    Text(
+                        text = heroEyebrow(state.phase, text),
+                        color = phaseColor(state.phase),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = heroTitle(state.phase, text),
+                        color = PrimaryText,
+                        fontSize = 25.sp,
+                        lineHeight = 30.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        text = heroBody(state.phase, text),
+                        color = SecondaryText,
+                        fontSize = 14.sp,
+                        lineHeight = 19.sp,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    ProgressLine(stage = stage, text = text)
+                }
 
-                Spacer(Modifier.weight(1f))
-                Text(text.currentStep.uppercase(), color = MutedText, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(7.dp))
-                Text(stageTitle(stage, text), color = AccentBlue, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(14.dp))
-                ProgressLine(stage, text)
+                ReceiverPreviewCard(
+                    state = state,
+                    text = text,
+                    modifier = Modifier.weight(0.72f),
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            StepGuideCard(text.step1Title, text.step1Desc, Modifier.weight(1f))
+            StepGuideCard(text.step2Title, text.step2Desc, Modifier.weight(1f))
+            StepGuideCard(text.step3Title, "${text.step3Desc} (${state.advertisedName})", Modifier.weight(1f))
+        }
+
+        if (!canDrawOverlays && !needsLocalNetwork) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(WarningAmber.copy(alpha = 0.08f), RoundedCornerShape(16.dp))
+                    .border(1.dp, WarningAmber.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+                    .padding(horizontal = 18.dp, vertical = 10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = text.backgroundLaunchTitle,
+                            color = WarningAmber,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = if (overlaySettingsSupported) text.backgroundLaunchHint else text.backgroundLaunchUnsupported,
+                            color = SecondaryText,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (overlaySettingsSupported) {
+                        Spacer(Modifier.width(14.dp))
+                        TvActionButton(
+                            label = text.enableBackgroundLaunch,
+                            onClick = onEnableOverlay,
+                            primary = true,
+                        )
+                    }
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            when {
+                needsLocalNetwork -> TvActionButton(
+                    label = text.allowNetwork,
+                    onClick = onPermission,
+                    modifier = Modifier.weight(1f),
+                    primary = true,
+                )
+                state.phase == ReceiverPhase.ERROR || state.phase == ReceiverPhase.STOPPED -> TvActionButton(
+                    label = text.restartReceiver,
+                    onClick = onRestart,
+                    modifier = Modifier.weight(1f),
+                    primary = true,
+                )
+                else -> QuickActionTile(
+                    title = text.renameTv,
+                    subtitle = state.advertisedName,
+                    onClick = onOpenSettings,
+                    modifier = Modifier.weight(1f),
+                )
             }
 
-            Spacer(Modifier.width(42.dp))
-            ReceiverVisual(state, text, Modifier.weight(0.75f).fillMaxHeight())
+            QuickActionTile(
+                title = text.openDiagnostics,
+                subtitle = stageTitle(stage, text),
+                onClick = onOpenDiagnostics,
+                modifier = Modifier.weight(1f),
+            )
+
+            QuickActionTile(
+                title = text.restartReceiver,
+                subtitle = state.localAddress ?: localizeNetworkLabel(state.networkLabel, text),
+                onClick = onRestart,
+                modifier = Modifier.weight(1f),
+            )
         }
-    }
-
-    Spacer(Modifier.height(20.dp))
-
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-        InfoTile(text.receiver, state.advertisedName, text.airplayName, Modifier.weight(1f))
-        InfoTile(text.network, state.networkLabel, state.localAddress ?: text.waiting, Modifier.weight(1f))
-        InfoTile(text.session, stageTitle(stage, text), state.lastRequest ?: text.waitingForSender, Modifier.weight(1f))
-    }
-
-    Spacer(Modifier.height(17.dp))
-    when {
-        !LocalNetworkPermission.isGranted(LocalContext.current) && LocalNetworkPermission.isRequired() -> ProductButton(text.allowNetwork, onPermission)
-        state.phase == ReceiverPhase.ERROR -> ProductButton(text.restartReceiver, onRestart)
     }
 }
 
 @Composable
-private fun ReceiverVisual(state: ReceiverState, text: UiStrings, modifier: Modifier) {
-    Box(
+private fun ReceiverPreviewCard(state: ReceiverState, text: UiStrings, modifier: Modifier = Modifier) {
+    Column(
         modifier = modifier
-            .background(Color(0xFF0A1117), RoundedCornerShape(24.dp))
-            .border(1.dp, Color(0xFF1D3038), RoundedCornerShape(24.dp))
-            .padding(24.dp),
-        contentAlignment = Alignment.Center,
+            .background(Color(0xFF0A1219), RoundedCornerShape(16.dp))
+            .border(1.dp, Border, RoundedCornerShape(16.dp))
+            .padding(12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.84f)
+                .aspectRatio(16f / 9f)
+                .background(Color(0xFF121E28), RoundedCornerShape(12.dp))
+                .border(1.dp, Color(0xFF284350), RoundedCornerShape(12.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
             Box(
                 modifier = Modifier
-                    .width(238.dp)
-                    .height(142.dp)
-                    .background(Color(0xFF111C24), RoundedCornerShape(18.dp))
-                    .border(1.dp, Color(0xFF27404A), RoundedCornerShape(18.dp)),
-                contentAlignment = Alignment.Center,
+                    .background(Accent.copy(alpha = 0.12f), RoundedCornerShape(12.dp))
+                    .border(1.dp, Accent.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
             ) {
-                Box(
-                    modifier = Modifier
-                        .width(58.dp)
-                        .height(58.dp)
-                        .background(Accent.copy(alpha = 0.10f), RoundedCornerShape(18.dp))
-                        .border(1.dp, Accent.copy(alpha = 0.25f), RoundedCornerShape(18.dp)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.Bottom) {
-                        Box(Modifier.width(7.dp).height(27.dp).background(Accent, RoundedCornerShape(6.dp)))
-                        Box(Modifier.width(7.dp).height(20.dp).background(AccentBlue, RoundedCornerShape(6.dp)))
-                        Box(Modifier.width(7.dp).height(14.dp).background(Color(0xFF4D8792), RoundedCornerShape(6.dp)))
-                    }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.Bottom) {
+                    Box(Modifier.width(6.dp).height(20.dp).background(Accent, RoundedCornerShape(3.dp)))
+                    Box(Modifier.width(6.dp).height(14.dp).background(AccentBlue, RoundedCornerShape(3.dp)))
+                    Box(Modifier.width(6.dp).height(9.dp).background(Color(0xFF4F8E9B), RoundedCornerShape(3.dp)))
                 }
             }
-            Spacer(Modifier.height(14.dp))
-            Box(Modifier.width(54.dp).height(5.dp).background(Color(0xFF263641), RoundedCornerShape(9.dp)))
-            Spacer(Modifier.height(22.dp))
-            Text(state.advertisedName, color = PrimaryText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(5.dp))
-            Text(text.localPrivate, color = MutedText, fontSize = 10.sp)
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(state.advertisedName, color = PrimaryText, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Text(text.localPrivate, color = MutedText, fontSize = 12.sp, maxLines = 1)
+    }
+}
+
+@Composable
+private fun StepGuideCard(title: String, description: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .background(Surface, RoundedCornerShape(16.dp))
+            .border(1.dp, Border, RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(title, color = Accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Text(
+            text = description,
+            color = SecondaryText,
+            fontSize = 12.sp,
+            lineHeight = 16.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun QuickActionTile(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    TvFocusCard(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(14.dp),
+        containerColor = Surface,
+        focusedColor = SurfaceFocused,
+        padding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+    ) { focused ->
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = title,
+                color = if (focused) Color.White else PrimaryText,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = subtitle,
+                color = if (focused) Accent else MutedText,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -134,60 +297,30 @@ private fun ProgressLine(stage: ProtocolStage, text: UiStrings) {
         ProtocolStage.DISCOVERY to text.discoveryShort,
         ProtocolStage.NEGOTIATION to text.negotiateShort,
         ProtocolStage.FAIRPLAY to text.secureShort,
+        ProtocolStage.TRANSPORT to text.transportShort,
         ProtocolStage.STREAMING to text.streamShort,
     )
-    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         items.forEachIndexed { index, item ->
             val active = stage >= item.first
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Box(
                     Modifier
-                        .width(25.dp)
-                        .height(5.dp)
-                        .background(if (active) Accent else Color(0xFF26343D), RoundedCornerShape(9.dp))
+                        .width(24.dp)
+                        .height(4.dp)
+                        .background(if (active) Accent else Color(0xFF253540), RoundedCornerShape(9.dp))
                 )
-                Spacer(Modifier.height(5.dp))
-                Text(item.second, color = if (active) SecondaryText else MutedText, fontSize = 9.sp)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = item.second,
+                    color = if (active) SecondaryText else MutedText,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                )
             }
             if (index != items.lastIndex) {
-                Box(Modifier.width(16.dp).height(1.dp).background(Color(0xFF26343D)))
+                Box(Modifier.width(10.dp).height(1.dp).background(Color(0xFF253540)))
             }
         }
     }
-}
-
-@Composable
-private fun InfoTile(label: String, value: String, helper: String, modifier: Modifier) {
-    Box(
-        modifier = modifier
-            .height(112.dp)
-            .background(Surface, RoundedCornerShape(19.dp))
-            .border(1.dp, Border, RoundedCornerShape(19.dp))
-            .padding(horizontal = 20.dp, vertical = 17.dp)
-    ) {
-        Column {
-            Text(label.uppercase(), color = MutedText, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            Text(value, color = PrimaryText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-            Spacer(Modifier.height(4.dp))
-            Text(helper, color = SecondaryText, fontSize = 10.sp, maxLines = 1)
-        }
-    }
-}
-
-@Composable
-internal fun ProductButton(label: String, onClick: () -> Unit) {
-    Button(
-        onClick = onClick,
-        colors = ButtonDefaults.colors(
-            containerColor = Color(0xFF163037),
-            contentColor = Accent,
-            focusedContainerColor = Accent,
-            focusedContentColor = Color(0xFF07110F),
-            pressedContainerColor = Color(0xFF45CBB0),
-            pressedContentColor = Color(0xFF07110F),
-            disabledContainerColor = Color(0xFF142126),
-            disabledContentColor = MutedText,
-        ),
-    ) { Text(label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
 }

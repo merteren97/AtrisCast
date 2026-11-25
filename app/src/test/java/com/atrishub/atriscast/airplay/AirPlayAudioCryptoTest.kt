@@ -72,4 +72,26 @@ class AirPlayAudioCryptoTest {
         assertTrue(deduplicator.shouldAccept(2))
         assertTrue(deduplicator.shouldAccept(0xFFFE))
     }
+
+    @Test
+    fun reusedCipherDecryptsMultiplePacketsIndependently() {
+        val key = ByteArray(16) { index -> (index + 11).toByte() }
+        val iv = ByteArray(16) { index -> (index + 21).toByte() }
+        val first = ByteArray(32) { index -> (index * 5).toByte() }
+        val second = ByteArray(41) { index -> (index * 9 + 3).toByte() }
+
+        val encryptor = Cipher.getInstance("AES/CBC/NoPadding").apply {
+            init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+        }
+        val firstEncrypted = encryptor.doFinal(first)
+        encryptor.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+        val secondEncrypted = encryptor.doFinal(second, 0, 32) + second.copyOfRange(32, second.size)
+
+        val sharedCipher = AirPlayAudioCrypto.createCipher()
+        val keySpec = SecretKeySpec(key, "AES")
+        val ivSpec = IvParameterSpec(iv)
+
+        assertArrayEquals(first, AirPlayAudioCrypto.decryptPayload(keySpec, ivSpec, firstEncrypted, sharedCipher))
+        assertArrayEquals(second, AirPlayAudioCrypto.decryptPayload(keySpec, ivSpec, secondEncrypted, sharedCipher))
+    }
 }

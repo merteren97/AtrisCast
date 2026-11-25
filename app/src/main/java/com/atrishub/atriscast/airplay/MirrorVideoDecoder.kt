@@ -5,6 +5,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
 import android.view.Surface
+import com.atrishub.atriscast.receiver.MirrorSurfaceRegistry
 import java.nio.ByteBuffer
 import java.util.ArrayDeque
 
@@ -22,12 +23,16 @@ class MirrorVideoDecoder(
 
     private var codec: MediaCodec? = null
     private var configuredSurface: Surface? = null
+    private var appliedFillScreen: Boolean = false
+    private var adaptivePlaybackSupported = false
     private var sps: ByteArray? = null
     private var pps: ByteArray? = null
     private var parameterSets: ByteArray? = null
     private var codedWidth = AirPlayProfile.DISPLAY_WIDTH.toInt()
     private var codedHeight = AirPlayProfile.DISPLAY_HEIGHT.toInt()
     private var awaitingKeyframe = true
+    private var forceInBandParameterSets = false
+    private var consecutiveCodecErrors = 0
 
     // This buffer is only for the short period before a visible Activity/overlay Surface exists.
     // Decoder back-pressure is handled by retrying the same WorkItem in MirrorStreamReceiver instead
@@ -53,7 +58,23 @@ class MirrorVideoDecoder(
         codedHeight = nextHeight
 
         val liveSurface = surfaceProvider()?.takeIf { it.isValid }
-        if (!sameCodecConfiguration || codec == null || liveSurface !== configuredSurface) {
+        val canAdaptInPlace = codec != null &&
+            liveSurface != null &&
+            liveSurface === configuredSurface &&
+            adaptivePlaybackSupported &&
+            nextWidth <= MAX_ADAPTIVE_DIMENSION &&
+            nextHeight <= MAX_ADAPTIVE_DIMENSION
+
+        if (!sameCodecConfiguration) {
+            if (canAdaptInPlace) {
+                // Keep the running MediaCodec alive across portrait/landscape/bitrate transitions
+                // when AdaptivePlayback is supported; prepend updated SPS/PPS on the next IDR.
+                awaitingKeyframe = true
+                forceInBandParameterSets = true
+            } else {
+                rebuild(liveSurface)
+            }
+        } else if (codec == null || liveSurface !== configuredSurface) {
             rebuild(liveSurface)
         }
         codec?.let { flushPendingFrames(it) }
@@ -81,8 +102,21 @@ class MirrorVideoDecoder(
      */
     fun pumpOutput(timeoutUs: Long = 0L) {
         val decoder = ensureDecoderForCurrentSurface() ?: return
+        syncScalingMode(decoder)
         if (!flushPendingFrames(decoder)) return
         drain(decoder, timeoutUs)
+    }
+
+    private fun syncScalingMode(decoder: MediaCodec) {
+        val desiredFill = MirrorSurfaceRegistry.fillScreen
+        if (desiredFill == appliedFillScreen) return
+        appliedFillScreen = desiredFill
+        val mode = if (desiredFill) {
+            MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+        } else {
+            MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT
+        }
+        runCatching { decoder.setVideoScalingMode(mode) }
     }
 
     fun requestResync() {
@@ -149,8 +183,10 @@ class MirrorVideoDecoder(
 
         // Established AirPlay receivers prepend the unencrypted SPS/PPS packet to the encrypted IDR
         // that immediately follows it. MediaCodec accepts csd-0/csd-1, but Android TV hardware
-        // decoders are more reliable when parameter sets are also present in-band at random access.
-        val sample = if (isIdr && !containsNalType(annexB, NAL_TYPE_SPS)) {
+        // decoders are more reliable when parameter sets are also present in-band at random access
+        // and after adaptive configuration updates.
+        val sample = if (isIdr && (forceInBandParameterSets || !containsNalType(annexB, NAL_TYPE_SPS))) {
+            forceInBandParameterSets = false
             (parameterSets ?: ByteArray(0)) + annexB
         } else {
             annexB
@@ -178,7 +214,10 @@ class MirrorVideoDecoder(
             drain(decoder, 0L)
             true
         } catch (e: Exception) {
-            onError("Video decoder failed: ${e.message ?: e.javaClass.simpleName}")
+            consecutiveCodecErrors++
+            if (consecutiveCodecErrors >= CONSECUTIVE_CODEC_ERROR_THRESHOLD) {
+                onError("Video decoder failed: ${e.message ?: e.javaClass.simpleName}")
+            }
             releaseCodec()
             awaitingKeyframe = true
             false
@@ -216,30 +255,75 @@ class MirrorVideoDecoder(
         try {
             val decoder = MediaCodec.createDecoderByType(MIME_AVC)
             codec = decoder
-            val lowLatencySupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && runCatching {
-                decoder.codecInfo
-                    .getCapabilitiesForType(MIME_AVC)
-                    .isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency)
-            }.getOrDefault(false)
+            val caps = runCatching { decoder.codecInfo.getCapabilitiesForType(MIME_AVC) }.getOrNull()
+            val lowLatencySupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                caps?.isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency) == true
+            val adaptiveSupported = caps?.isFeatureSupported(
+                MediaCodecInfo.CodecCapabilities.FEATURE_AdaptivePlayback
+            ) == true
+            adaptivePlaybackSupported = adaptiveSupported
 
-            val format = MediaFormat.createVideoFormat(MIME_AVC, codedWidth, codedHeight).apply {
-                setByteBuffer("csd-0", ByteBuffer.wrap(MirrorCrypto.withStartCode(configSps)))
-                setByteBuffer("csd-1", ByteBuffer.wrap(MirrorCrypto.withStartCode(configPps)))
-                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_INPUT_SIZE)
-                setInteger(MediaFormat.KEY_PRIORITY, 0) // realtime playback priority
-                setInteger(MediaFormat.KEY_FRAME_RATE, AirPlayProfile.DISPLAY_MAX_FPS.toInt())
-                if (lowLatencySupported && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-                }
+            val configured = runCatching {
+                val tuned = createFormat(
+                    configSps = configSps,
+                    configPps = configPps,
+                    lowLatencySupported = lowLatencySupported,
+                    adaptiveSupported = adaptiveSupported,
+                    includeTuning = true,
+                )
+                decoder.configure(tuned, surface, null, 0)
+            }
+            if (configured.isFailure) {
+                // Retry with conservative format keys if a TV SoC driver rejects operating rate or adaptive caps.
+                adaptivePlaybackSupported = false
+                val baseline = createFormat(
+                    configSps = configSps,
+                    configPps = configPps,
+                    lowLatencySupported = lowLatencySupported,
+                    adaptiveSupported = false,
+                    includeTuning = false,
+                )
+                decoder.configure(baseline, surface, null, 0)
             }
 
-            decoder.configure(format, surface, null, 0)
             decoder.start()
-            decoder.setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT)
+            appliedFillScreen = MirrorSurfaceRegistry.fillScreen
+            decoder.setVideoScalingMode(
+                if (appliedFillScreen) {
+                    MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                } else {
+                    MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT
+                }
+            )
             awaitingKeyframe = true
+            forceInBandParameterSets = false
         } catch (e: Exception) {
             onError("Could not initialize H.264 decoder: ${e.message ?: e.javaClass.simpleName}")
             releaseCodec()
+        }
+    }
+
+    private fun createFormat(
+        configSps: ByteArray,
+        configPps: ByteArray,
+        lowLatencySupported: Boolean,
+        adaptiveSupported: Boolean,
+        includeTuning: Boolean,
+    ): MediaFormat = MediaFormat.createVideoFormat(MIME_AVC, codedWidth, codedHeight).apply {
+        setByteBuffer("csd-0", ByteBuffer.wrap(MirrorCrypto.withStartCode(configSps)))
+        setByteBuffer("csd-1", ByteBuffer.wrap(MirrorCrypto.withStartCode(configPps)))
+        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_INPUT_SIZE)
+        setInteger(MediaFormat.KEY_PRIORITY, 0) // realtime playback priority
+        setInteger(MediaFormat.KEY_FRAME_RATE, AirPlayProfile.DISPLAY_MAX_FPS.toInt())
+        if (adaptiveSupported) {
+            setInteger(MediaFormat.KEY_MAX_WIDTH, maxOf(codedWidth, MAX_ADAPTIVE_DIMENSION))
+            setInteger(MediaFormat.KEY_MAX_HEIGHT, maxOf(codedHeight, MAX_ADAPTIVE_DIMENSION))
+        }
+        if (includeTuning) {
+            setInteger(MediaFormat.KEY_OPERATING_RATE, OPERATING_RATE_FPS)
+            if (lowLatencySupported && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            }
         }
     }
 
@@ -252,7 +336,13 @@ class MirrorVideoDecoder(
                 MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                     // Android documents that the scaling mode may need to be re-applied after an
                     // output-format change. Keeping this deterministic avoids device-specific jumps.
-                    runCatching { decoder.setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT) }
+                    appliedFillScreen = MirrorSurfaceRegistry.fillScreen
+                    val mode = if (appliedFillScreen) {
+                        MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                    } else {
+                        MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT
+                    }
+                    runCatching { decoder.setVideoScalingMode(mode) }
                     onFormat(describeOutputFormat(decoder.outputFormat))
                 }
                 MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> Unit
@@ -261,7 +351,10 @@ class MirrorVideoDecoder(
                     val decodeOnly = (info.flags and MediaCodec.BUFFER_FLAG_DECODE_ONLY) != 0
                     val render = !codecConfig && !decodeOnly
                     decoder.releaseOutputBuffer(outputIndex, render)
-                    if (render) onFrameRendered()
+                    if (render) {
+                        consecutiveCodecErrors = 0
+                        onFrameRendered()
+                    }
                 }
             }
             // Only the first dequeue may wait. Once one output event was observed, drain everything
@@ -294,6 +387,7 @@ class MirrorVideoDecoder(
         val current = codec
         codec = null
         configuredSurface = null
+        adaptivePlaybackSupported = false
         if (current != null) {
             runCatching { current.stop() }
             runCatching { current.release() }
@@ -326,7 +420,10 @@ class MirrorVideoDecoder(
         private const val INPUT_RETRY_COUNT = 4
         private const val INPUT_RETRY_TIMEOUT_US = 2_000L
         private const val OUTPUT_RETRY_WAIT_US = 1_000L
+        private const val OPERATING_RATE_FPS = 120
+        private const val MAX_ADAPTIVE_DIMENSION = 1920
         private const val MAX_INPUT_SIZE = 4 * 1024 * 1024
         private const val MAX_PENDING_SURFACE_FRAMES = 120
+        private const val CONSECUTIVE_CODEC_ERROR_THRESHOLD = 2
     }
 }

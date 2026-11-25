@@ -6,6 +6,7 @@ import android.view.Surface
 object MirrorSurfaceRegistry {
     @Volatile private var activitySurface: Surface? = null
     @Volatile private var overlaySurface: Surface? = null
+    @Volatile var fillScreen: Boolean = false
 
     fun attachActivity(surface: Surface) {
         activitySurface = surface
@@ -24,10 +25,9 @@ object MirrorSurfaceRegistry {
     }
 
     fun current(): Surface? {
-        // Once a background mirror overlay has been created, keep that Surface stable until the
-        // mirror session ends. Switching from overlay -> Activity merely because MainActivity became
-        // visible would force MediaCodec to rebuild mid-stream and can produce another visible hitch.
-        return overlaySurface?.takeIf { it.isValid }
-            ?: activitySurface?.takeIf { it.isValid }
+        // Prefer MainActivity's dedicated playback Surface whenever visible so users get remote
+        // OSD/Back controls; fall back to the service overlay Surface when backgrounded.
+        return activitySurface?.takeIf { it.isValid }
+            ?: overlaySurface?.takeIf { it.isValid }
     }
 }

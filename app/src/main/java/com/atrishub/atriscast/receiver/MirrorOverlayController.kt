@@ -7,21 +7,22 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.TextView
 import kotlin.math.roundToInt
 
 /**
  * Owns a full-screen SurfaceView overlay while AtrisCast's Activity is not visible.
  *
- * Android restricts background Activity launches, so a foreground receiver service cannot reliably
- * bring MainActivity to the front when an iPhone starts mirroring. A user-granted application
- * overlay is the deterministic TV-friendly fallback: it exists only for the active mirror session,
- * is not touchable/focusable, and is removed immediately when the session or service stops.
+ * Uses PixelFormat.TRANSLUCENT on the host window so SurfaceView hole-punching (`setZOrderOnTop(false)`)
+ * composites cleanly on all Android TV hardware compositors.
  */
 class MirrorOverlayController(
     context: Context,
@@ -34,14 +35,16 @@ class MirrorOverlayController(
     @Volatile private var requestedVisible = false
     @Volatile private var visibleWidth = 0
     @Volatile private var visibleHeight = 0
+    @Volatile private var framesRendered = false
 
     private var rootView: FrameLayout? = null
     private var surfaceView: SurfaceView? = null
+    private var loadingLabel: TextView? = null
     private var attachedSurface: Surface? = null
 
     fun canShow(): Boolean = Settings.canDrawOverlays(appContext)
 
-    /** Returns false when Android's one-time "display over other apps" permission is not granted. */
+    /** Returns false when Android's "display over other apps" permission is not granted. */
     fun show(): Boolean {
         if (!canShow()) return false
         requestedVisible = true
@@ -53,7 +56,14 @@ class MirrorOverlayController(
 
     fun hide() {
         requestedVisible = false
+        framesRendered = false
         mainHandler.post(::removeOverlay)
+    }
+
+    fun markFirstFrameRendered() {
+        if (framesRendered) return
+        framesRendered = true
+        mainHandler.post { loadingLabel?.visibility = View.GONE }
     }
 
     fun updateGeometry(width: Int, height: Int) {
@@ -91,11 +101,29 @@ class MirrorOverlayController(
                 }
             })
         }
+        val turkish = ReceiverPreferences(appContext).languageCode == ReceiverPreferences.LANGUAGE_TURKISH
+        val statusText = TextView(appContext).apply {
+            text = if (turkish) "AirPlay ekranı başlatılıyor…" else "Starting AirPlay screen…"
+            setTextColor(Color.parseColor("#E6F2F0"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setPadding(36, 20, 36, 20)
+            setBackgroundColor(Color.parseColor("#CC101922"))
+            visibility = if (framesRendered) View.GONE else View.VISIBLE
+        }
+
         root.addView(
             mirrorSurface,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER,
+            )
+        )
+        root.addView(
+            statusText,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.CENTER,
             )
         )
@@ -109,7 +137,7 @@ class MirrorOverlayController(
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
                 WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
-            PixelFormat.OPAQUE,
+            PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.CENTER
             title = "AtrisCast AirPlay mirror"
@@ -129,6 +157,7 @@ class MirrorOverlayController(
 
         rootView = root
         surfaceView = mirrorSurface
+        loadingLabel = statusText
         applySurfaceGeometry()
     }
 
@@ -183,5 +212,6 @@ class MirrorOverlayController(
         rootView?.let { root -> runCatching { windowManager.removeViewImmediate(root) } }
         rootView = null
         surfaceView = null
+        loadingLabel = null
     }
 }

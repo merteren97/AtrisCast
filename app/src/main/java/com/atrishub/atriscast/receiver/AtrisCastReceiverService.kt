@@ -6,9 +6,15 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.atrishub.atriscast.MainActivity
@@ -24,6 +30,7 @@ class AtrisCastReceiverService : Service() {
     private lateinit var identity: DeviceIdentity
     private lateinit var networkInfo: NetworkInfoProvider
     private lateinit var mirrorOverlay: MirrorOverlayController
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var multicastLock: WifiManager.MulticastLock? = null
     private var wifiLowLatencyLock: WifiManager.WifiLock? = null
@@ -32,14 +39,29 @@ class AtrisCastReceiverService : Service() {
     private var advertiser: MdnsAdvertiser? = null
     private var socketServer: AirPlaySocketServer? = null
     private var uiVisibilityListener: ((Boolean) -> Unit)? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
-    // Audio and video callbacks can exceed 100 events/second together. Publishing every packet/frame
-    // into the Compose-observed StateFlow created avoidable allocation/recomposition pressure on the
-    // same TV that is decoding H.264. Keep accurate atomic counters and expose telemetry at 4 Hz.
     private val streamTelemetryEnabled = AtomicBoolean(false)
     private val mediaBytesCounter = AtomicLong(0L)
     private val renderedFramesCounter = AtomicLong(0L)
     private val lastTelemetryPublishNanos = AtomicLong(0L)
+    private var lastObservedIpv4: String? = null
+
+    private val overlayFallbackRunnable = Runnable {
+        if (ReceiverRuntime.state.value.mirrorActive && !ReceiverUiVisibility.isVisible()) {
+            mirrorOverlay.show()
+        }
+    }
+
+    private val hideOverlayAfterActivityRunnable = Runnable {
+        if (ReceiverUiVisibility.isVisible()) {
+            mirrorOverlay.hide()
+        }
+    }
+
+    private val networkRefreshRunnable = Runnable {
+        refreshNetworkAndMdns()
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -51,20 +73,35 @@ class AtrisCastReceiverService : Service() {
         }
 
         uiVisibilityListener = { visible ->
-            // If the user leaves AtrisCast while mirroring, create the service-owned overlay. Once
-            // created, keep that Surface stable for the rest of the session even if MainActivity is
-            // later brought forward; switching MediaCodec targets mid-stream causes a visible hitch.
-            if (!visible && ReceiverRuntime.state.value.mirrorActive) {
-                showMirrorSurfaceIfNeeded()
+            if (visible) {
+                mainHandler.removeCallbacks(overlayFallbackRunnable)
+                cancelCastAlertNotification()
+                // Allow MainActivity's SurfaceView a brief moment to mount before detaching overlay.
+                mainHandler.postDelayed(hideOverlayAfterActivityRunnable, OVERLAY_HANDOFF_DELAY_MS)
+            } else if (ReceiverRuntime.state.value.mirrorActive && preferences.autoOpenOnCast) {
+                mainHandler.removeCallbacks(hideOverlayAfterActivityRunnable)
+                mirrorOverlay.show()
             }
         }
         ReceiverUiVisibility.setListener(uiVisibilityListener)
 
-        createNotificationChannel()
+        createNotificationChannels()
         startForeground(NOTIFICATION_ID, buildNotification())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_DISCONNECT_MIRROR -> {
+                socketServer?.stopActiveSession()
+                return START_STICKY
+            }
+            ACTION_REFRESH_NOTIFICATION -> {
+                getSystemService(NotificationManager::class.java)
+                    ?.notify(NOTIFICATION_ID, buildNotification())
+                return START_STICKY
+            }
+        }
+
         if (!LocalNetworkPermission.isGranted(this)) {
             ReceiverRuntime.update {
                 it.copy(
@@ -83,9 +120,11 @@ class AtrisCastReceiverService : Service() {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null)
         ReceiverUiVisibility.setListener(null)
         uiVisibilityListener = null
         streamTelemetryEnabled.set(false)
+        cancelCastAlertNotification()
         stopReceiver()
         ReceiverRuntime.update {
             it.copy(
@@ -109,12 +148,14 @@ class AtrisCastReceiverService : Service() {
     private fun startReceiver() {
         if (advertiser != null || socketServer != null) return
 
+        val initialIpv4 = networkInfo.localIpv4()
+        lastObservedIpv4 = initialIpv4
         ReceiverRuntime.replace(
             ReceiverState(
                 phase = ReceiverPhase.STARTING,
                 advertisedName = preferences.displayName,
                 networkLabel = networkInfo.networkLabel(),
-                localAddress = networkInfo.localIpv4(),
+                localAddress = initialIpv4,
             )
         )
 
@@ -192,6 +233,7 @@ class AtrisCastReceiverService : Service() {
             },
             onVideoFrameRendered = {
                 val frames = renderedFramesCounter.incrementAndGet()
+                if (frames == 1L) mirrorOverlay.markFirstFrameRendered()
                 publishStreamTelemetry(force = frames == 1L)
             },
             onVideoFormat = { format ->
@@ -296,6 +338,55 @@ class AtrisCastReceiverService : Service() {
             },
             onError = { message -> ReceiverRuntime.update { it.copy(phase = ReceiverPhase.ERROR, error = message) } },
         ).also { it.start(preferences.displayName) }
+
+        registerNetworkCallback()
+    }
+
+    private fun registerNetworkCallback() {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = scheduleNetworkRefresh()
+            override fun onLost(network: Network) = scheduleNetworkRefresh()
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) =
+                scheduleNetworkRefresh()
+        }
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .build()
+        runCatching {
+            cm.registerNetworkCallback(request, callback)
+            networkCallback = callback
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val cb = networkCallback ?: return
+        networkCallback = null
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        runCatching { cm.unregisterNetworkCallback(cb) }
+    }
+
+    private fun scheduleNetworkRefresh() {
+        mainHandler.removeCallbacks(networkRefreshRunnable)
+        mainHandler.postDelayed(networkRefreshRunnable, NETWORK_REFRESH_DEBOUNCE_MS)
+    }
+
+    private fun refreshNetworkAndMdns() {
+        val newLabel = networkInfo.networkLabel()
+        val newIpv4 = networkInfo.localIpv4()
+        val ipChanged = newIpv4 != lastObservedIpv4
+        lastObservedIpv4 = newIpv4
+
+        ReceiverRuntime.update {
+            it.copy(
+                networkLabel = newLabel,
+                localAddress = newIpv4,
+            )
+        }
+
+        if (ipChanged && newIpv4 != null && !ReceiverRuntime.state.value.mirrorActive) {
+            advertiser?.restart(preferences.displayName)
+        }
     }
 
     private fun resetStreamTelemetry() {
@@ -336,11 +427,25 @@ class AtrisCastReceiverService : Service() {
             mirrorOverlay.hide()
             return
         }
+        if (!preferences.autoOpenOnCast) return
 
-        // Android 10+ intentionally restricts background Activity launches. When the user granted
-        // the special overlay permission, render directly from the foreground receiver service;
-        // otherwise keep the old best-effort Activity start as a compatibility fallback.
-        if (!mirrorOverlay.show()) bringMirrorUiToForeground()
+        wakeDisplayBriefly()
+
+        // 1. Always attempt to launch MainActivity fullscreen first. When SYSTEM_ALERT_WINDOW is
+        //    granted, Android exempts this background Activity start so the user lands directly on
+        //    MirrorPlaybackScreen with full D-pad/OSD/Back support and zero surface switch hitch.
+        bringMirrorUiToForeground()
+
+        // 2. If overlay permission is missing, post a high-priority Full-Screen Intent casting
+        //    notification as an OS-sanctioned fallback on Android TV builds that support FSI.
+        if (!OverlayPermissionHelper.canDrawOverlays(this)) {
+            postCastFullScreenNotification()
+        }
+
+        // 3. If MainActivity still has not reached the foreground within 650 ms (e.g., blocked by
+        //    the current screen or OS policy), fall back to the translucent service overlay.
+        mainHandler.removeCallbacks(overlayFallbackRunnable)
+        mainHandler.postDelayed(overlayFallbackRunnable, OVERLAY_FALLBACK_DELAY_MS)
     }
 
     private fun bringMirrorUiToForeground() {
@@ -350,6 +455,7 @@ class AtrisCastReceiverService : Service() {
                     action = MainActivity.ACTION_SHOW_MIRROR
                     addFlags(
                         Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP or
                             Intent.FLAG_ACTIVITY_SINGLE_TOP or
                             Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
                     )
@@ -359,12 +465,21 @@ class AtrisCastReceiverService : Service() {
     }
 
     @Suppress("DEPRECATION")
+    private fun wakeDisplayBriefly() {
+        val power = applicationContext.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        runCatching {
+            val wake = power.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "AtrisCast:WakeDisplay",
+            )
+            wake.acquire(DISPLAY_WAKE_MS)
+        }
+    }
+
+    @Suppress("DEPRECATION")
     private fun acquireStreamingPerformanceLocks() {
         val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
 
-        // HIGH_PERF remains useful on older Google TV builds when AtrisCast's Activity is not the
-        // foreground window. Android documents that, when both locks are held, LOW_LATENCY takes
-        // precedence while eligible and HIGH_PERF can cover the remaining state on older releases.
         val highPerformance = wifiHighPerformanceLock ?: wifi.createWifiLock(
             WifiManager.WIFI_MODE_FULL_HIGH_PERF,
             "AtrisCast:AirPlayHighPerf",
@@ -408,6 +523,9 @@ class AtrisCastReceiverService : Service() {
     }
 
     private fun stopMirrorPresentation() {
+        mainHandler.removeCallbacks(overlayFallbackRunnable)
+        mainHandler.removeCallbacks(hideOverlayAfterActivityRunnable)
+        cancelCastAlertNotification()
         mirrorOverlay.hide()
         releaseStreamingPerformanceLocks()
     }
@@ -426,6 +544,7 @@ class AtrisCastReceiverService : Service() {
         if (candidate.ordinal > current.ordinal) candidate else current
 
     private fun stopReceiver() {
+        unregisterNetworkCallback()
         stopMirrorPresentation()
         advertiser?.stop()
         advertiser = null
@@ -443,15 +562,26 @@ class AtrisCastReceiverService : Service() {
         }
     }
 
-    private fun createNotificationChannel() {
-        val channel = NotificationChannel(
+    private fun createNotificationChannels() {
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        val serviceChannel = NotificationChannel(
             CHANNEL_ID,
             getString(R.string.notification_channel_name),
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
             description = getString(R.string.notification_channel_description)
         }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        val castChannel = NotificationChannel(
+            CAST_CHANNEL_ID,
+            getString(R.string.cast_notification_channel_name),
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+            description = getString(R.string.cast_notification_channel_description)
+            setSound(null, null)
+            enableVibration(false)
+        }
+        manager.createNotificationChannel(serviceChannel)
+        manager.createNotificationChannel(castChannel)
     }
 
     private fun buildNotification(): android.app.Notification {
@@ -475,11 +605,57 @@ class AtrisCastReceiverService : Service() {
             .build()
     }
 
+    private fun postCastFullScreenNotification() {
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        val turkish = preferences.languageCode == ReceiverPreferences.LANGUAGE_TURKISH
+        val showIntent = PendingIntent.getActivity(
+            this,
+            1,
+            Intent(this, MainActivity::class.java).apply {
+                action = MainActivity.ACTION_SHOW_MIRROR
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP
+                )
+            },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val notification = NotificationCompat.Builder(this, CAST_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_atriscast)
+            .setContentTitle(if (turkish) "AirPlay ekran yansıtma aktif" else "AirPlay mirroring active")
+            .setContentText(
+                if (turkish) "Tam ekran açmak için seçin." else "Select to open fullscreen mirroring."
+            )
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setAutoCancel(true)
+            .setContentIntent(showIntent)
+            .setFullScreenIntent(showIntent, true)
+            .build()
+        runCatching { manager.notify(CAST_NOTIFICATION_ID, notification) }
+    }
+
+    private fun cancelCastAlertNotification() {
+        runCatching {
+            getSystemService(NotificationManager::class.java)?.cancel(CAST_NOTIFICATION_ID)
+        }
+    }
+
     companion object {
         private const val CHANNEL_ID = "atriscast_receiver"
+        private const val CAST_CHANNEL_ID = "atriscast_cast_alert"
         private const val NOTIFICATION_ID = 1001
+        private const val CAST_NOTIFICATION_ID = 1002
         private const val STREAM_WAKE_LOCK_TIMEOUT_MS = 6L * 60L * 60L * 1_000L
         private const val STREAM_TELEMETRY_INTERVAL_NS = 250_000_000L
+        private const val OVERLAY_FALLBACK_DELAY_MS = 650L
+        private const val OVERLAY_HANDOFF_DELAY_MS = 180L
+        private const val NETWORK_REFRESH_DEBOUNCE_MS = 1_000L
+        private const val DISPLAY_WAKE_MS = 3_000L
+
+        const val ACTION_DISCONNECT_MIRROR = "com.atrishub.atriscast.action.DISCONNECT_MIRROR"
+        const val ACTION_REFRESH_NOTIFICATION = "com.atrishub.atriscast.action.REFRESH_NOTIFICATION"
 
         fun start(context: Context) {
             context.startForegroundService(Intent(context, AtrisCastReceiverService::class.java))
@@ -492,6 +668,22 @@ class AtrisCastReceiverService : Service() {
         fun restart(context: Context) {
             stop(context)
             start(context)
+        }
+
+        fun disconnectMirror(context: Context) {
+            context.startService(
+                Intent(context, AtrisCastReceiverService::class.java).apply {
+                    action = ACTION_DISCONNECT_MIRROR
+                }
+            )
+        }
+
+        fun refreshNotification(context: Context) {
+            context.startService(
+                Intent(context, AtrisCastReceiverService::class.java).apply {
+                    action = ACTION_REFRESH_NOTIFICATION
+                }
+            )
         }
     }
 }

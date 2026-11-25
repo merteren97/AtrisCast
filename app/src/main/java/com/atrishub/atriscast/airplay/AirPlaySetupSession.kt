@@ -39,11 +39,17 @@ class AirPlaySetupSession(
 
     private val running = AtomicBoolean(true)
     private val ioExecutor: ExecutorService = Executors.newCachedThreadPool()
+    private val baseEpochMillis = System.currentTimeMillis()
+    private val baseNanoTime = System.nanoTime()
 
     @Volatile private var timingSocket: DatagramSocket? = null
     @Volatile private var mirrorReceiver: MirrorStreamReceiver? = null
     @Volatile private var audioReceiver: AirPlayAudioReceiver? = null
     @Volatile private var bufferedAudioServer: ServerSocket? = null
+    @Volatile private var mirrorActive = false
+
+    val hasActiveSession: Boolean
+        get() = mirrorActive || audioReceiver != null || bufferedAudioServer != null
 
     @Volatile var encryptedStreamKey: ByteArray? = null
         private set
@@ -167,7 +173,7 @@ class AirPlaySetupSession(
 
                         val packet = DatagramPacket(response, response.size)
                         socket.receive(packet)
-                        val receivedAtMillis = System.currentTimeMillis()
+                        val receivedAtMillis = monotonicEpochMillis()
                         if (packet.length >= TIMING_RESPONSE_MIN_SIZE) {
                             clientReferenceTimestamp = response.copyOfRange(24, 32)
                             previousReceiveTimeMillis = receivedAtMillis
@@ -192,13 +198,19 @@ class AirPlaySetupSession(
             fairPlayKey = fairPlayKey,
             streamConnectionId = streamConnectionId,
             surfaceProvider = surfaceProvider,
-            onStarted = onMirrorStarted,
+            onStarted = {
+                mirrorActive = true
+                onMirrorStarted()
+            },
             onMediaActivity = onMediaActivity,
             onFrameRendered = onVideoFrameRendered,
             onFormat = onVideoFormat,
             onGeometry = onVideoGeometry,
             onError = onMirrorError,
-            onStopped = onMirrorStopped,
+            onStopped = {
+                mirrorActive = false
+                onMirrorStopped()
+            },
         )
         mirrorReceiver = receiver
         receiver.start()
@@ -290,8 +302,11 @@ class AirPlaySetupSession(
             clientReferenceTimestamp.copyInto(packet, destinationOffset = 8)
         }
         previousReceiveTimeMillis?.let { putNtpTimestamp(packet, 16, it) }
-        putNtpTimestamp(packet, 24, System.currentTimeMillis())
+        putNtpTimestamp(packet, 24, monotonicEpochMillis())
     }
+
+    private fun monotonicEpochMillis(): Long =
+        baseEpochMillis + (System.nanoTime() - baseNanoTime).coerceAtLeast(0L) / 1_000_000L
 
     private fun putNtpTimestamp(target: ByteArray, offset: Int, epochMillis: Long) {
         val seconds = epochMillis / 1_000L + NTP_UNIX_EPOCH_OFFSET
@@ -319,7 +334,7 @@ class AirPlaySetupSession(
         private const val STREAM_MIRROR = 110
         private const val DEFAULT_AUDIO_CODEC = 8
         private const val DEFAULT_AUDIO_SPF = 480
-        private const val TIMING_INTERVAL_MS = 3_000L
+        private const val TIMING_INTERVAL_MS = 1_500L
         private const val TIMING_RESPONSE_MIN_SIZE = 32
         private const val NTP_UNIX_EPOCH_OFFSET = 2_208_988_800L
     }
