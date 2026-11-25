@@ -10,11 +10,14 @@ import java.io.Closeable
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.PortUnreachableException
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.util.ArrayDeque
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -38,10 +41,25 @@ class AirPlayAudioReceiver(
     private val onStarted: () -> Unit,
     private val onError: (String) -> Unit,
 ) : Closeable {
+    private data class PcmFormat(
+        val sampleRate: Int,
+        val channelCount: Int,
+        val encoding: Int,
+    )
+
+    private sealed interface AudioChunk {
+        data class Format(val format: PcmFormat) : AudioChunk
+        data class Samples(val pcm: ByteArray) : AudioChunk
+    }
+
     private val running = AtomicBoolean(true)
     private val started = AtomicBoolean(false)
-    private val worker: ExecutorService = Executors.newFixedThreadPool(2)
-    private val dataSocket = DatagramSocket(0).apply { soTimeout = SOCKET_TIMEOUT_MS }
+    private val worker: ExecutorService = Executors.newFixedThreadPool(3)
+    private val pcmQueue = ArrayBlockingQueue<AudioChunk>(PCM_QUEUE_CAPACITY)
+    private val dataSocket = DatagramSocket(0).apply {
+        soTimeout = SOCKET_TIMEOUT_MS
+        runCatching { receiveBufferSize = UDP_RECEIVE_BUFFER_BYTES }
+    }
     private val controlSocket = DatagramSocket(0).apply { soTimeout = SOCKET_TIMEOUT_MS }
     private val sessionKey = fairPlayKey.clone()
     private val iv = encryptionIv.clone()
@@ -59,6 +77,7 @@ class AirPlayAudioReceiver(
 
     fun start() {
         worker.execute(::audioLoop)
+        worker.execute(::playbackLoop)
         worker.execute(::controlLoop)
     }
 
@@ -69,15 +88,21 @@ class AirPlayAudioReceiver(
             return
         }
 
-        val decoder = runCatching { AacEldDecoder(samplesPerFrame, ::markStarted) }
-            .getOrElse { cause ->
-                onError("Could not initialize AAC-ELD audio decoder: ${cause.message ?: cause.javaClass.simpleName}")
-                drainDataSocket()
-                return
+        val decoder = runCatching {
+            AacEldDecoder(samplesPerFrame) { chunk ->
+                enqueuePcm(chunk)
             }
+        }.getOrElse { cause ->
+            onError("Could not initialize AAC-ELD audio decoder: ${cause.message ?: cause.javaClass.simpleName}")
+            drainDataSocket()
+            return
+        }
 
         val packetBuffer = ByteArray(MAX_PACKET_SIZE)
         val sequenceDeduplicator = RtpSequenceDeduplicator()
+        val cipher = AirPlayAudioCrypto.createCipher()
+        val secretKey = SecretKeySpec(sessionKey, "AES")
+        val ivSpec = IvParameterSpec(iv)
         var baseRtpTimestamp: Long? = null
         var lastPresentationTimeUs = -1L
 
@@ -88,6 +113,8 @@ class AirPlayAudioReceiver(
                     dataSocket.receive(packet)
                 } catch (_: SocketTimeoutException) {
                     decoder.pumpOutput()
+                    continue
+                } catch (_: PortUnreachableException) {
                     continue
                 }
 
@@ -111,7 +138,7 @@ class AirPlayAudioReceiver(
                     offset + RTP_HEADER_SIZE,
                     offset + packet.length,
                 )
-                val payload = AirPlayAudioCrypto.decryptPayload(sessionKey, iv, encryptedPayload)
+                val payload = AirPlayAudioCrypto.decryptPayload(secretKey, ivSpec, encryptedPayload, cipher)
                 if (payload.isEmpty() || payload.contentEquals(NO_DATA_MARKER)) continue
 
                 if (baseRtpTimestamp == null) baseRtpTimestamp = rtpTimestamp
@@ -133,6 +160,104 @@ class AirPlayAudioReceiver(
         } finally {
             decoder.release()
         }
+    }
+
+    private fun enqueuePcm(chunk: AudioChunk) {
+        if (chunk is AudioChunk.Format) {
+            pcmQueue.offer(chunk)
+            return
+        }
+        // Keep bounded latency: if the audio sink stalls briefly, drop the oldest PCM samples
+        // rather than blocking the UDP socket thread and causing RTP kernel packet loss.
+        while (!pcmQueue.offer(chunk) && running.get()) {
+            val head = pcmQueue.peek()
+            if (head is AudioChunk.Format) break
+            pcmQueue.poll()
+        }
+    }
+
+    private fun playbackLoop() {
+        var audioTrack: AudioTrack? = null
+        var currentFormat: PcmFormat? = null
+
+        try {
+            while (running.get()) {
+                val chunk = try {
+                    pcmQueue.poll(PLAYBACK_POLL_MS, TimeUnit.MILLISECONDS)
+                } catch (_: InterruptedException) {
+                    return
+                } ?: continue
+
+                when (chunk) {
+                    is AudioChunk.Format -> {
+                        if (currentFormat != chunk.format || audioTrack == null) {
+                            currentFormat = chunk.format
+                            audioTrack = rebuildAudioTrack(audioTrack, chunk.format)
+                        }
+                    }
+
+                    is AudioChunk.Samples -> {
+                        val format = currentFormat ?: PcmFormat(SAMPLE_RATE, CHANNEL_COUNT, AudioFormat.ENCODING_PCM_16BIT).also {
+                            currentFormat = it
+                        }
+                        var track = audioTrack ?: rebuildAudioTrack(null, format).also { audioTrack = it }
+                        val pcm = chunk.pcm
+                        var offset = 0
+                        while (offset < pcm.size && running.get()) {
+                            val activeTrack = track ?: break
+                            val written = activeTrack.write(pcm, offset, pcm.size - offset, AudioTrack.WRITE_BLOCKING)
+                            if (written <= 0) {
+                                // Recover transparently from AudioTrack dead-object/sink reset.
+                                track = rebuildAudioTrack(activeTrack, format).also { audioTrack = it }
+                                break
+                            }
+                            offset += written
+                        }
+                        if (track != null) markStarted()
+                    }
+                }
+            }
+        } finally {
+            releaseAudioTrack(audioTrack)
+        }
+    }
+
+    private fun rebuildAudioTrack(existing: AudioTrack?, format: PcmFormat): AudioTrack? {
+        releaseAudioTrack(existing)
+        val channelMask = when (format.channelCount) {
+            1 -> AudioFormat.CHANNEL_OUT_MONO
+            else -> AudioFormat.CHANNEL_OUT_STEREO
+        }
+        val minimumBuffer = AudioTrack.getMinBufferSize(format.sampleRate, channelMask, format.encoding)
+        if (minimumBuffer <= 0) return null
+
+        return runCatching {
+            AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(format.encoding)
+                        .setSampleRate(format.sampleRate)
+                        .setChannelMask(channelMask)
+                        .build()
+                )
+                .setBufferSizeInBytes((minimumBuffer * 2).coerceAtLeast(16 * 1024))
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+                .apply { play() }
+        }.getOrNull()
+    }
+
+    private fun releaseAudioTrack(track: AudioTrack?) {
+        if (track == null) return
+        runCatching { track.stop() }
+        runCatching { track.flush() }
+        runCatching { track.release() }
     }
 
     private fun drainDataSocket() {
@@ -173,15 +298,15 @@ class AirPlayAudioReceiver(
         if (!running.compareAndSet(true, false)) return
         runCatching { dataSocket.close() }
         runCatching { controlSocket.close() }
+        pcmQueue.clear()
         worker.shutdownNow()
     }
 
     private class AacEldDecoder(
         samplesPerFrame: Int,
-        private val onStarted: () -> Unit,
+        private val onChunk: (AudioChunk) -> Unit,
     ) {
         private var codec: MediaCodec? = null
-        private var audioTrack: AudioTrack? = null
 
         init {
             // AirPlay mirroring uses MPEG-4 ER AAC-ELD (Audio Object Type 39), not AAC-LD
@@ -230,23 +355,18 @@ class AirPlayAudioReceiver(
             while (true) {
                 when (val outputIndex = decoder.dequeueOutputBuffer(info, timeoutUs)) {
                     MediaCodec.INFO_TRY_AGAIN_LATER -> return
-                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> rebuildAudioTrack(decoder.outputFormat)
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> onChunk(AudioChunk.Format(extractFormat(decoder.outputFormat)))
                     MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> Unit
                     else -> if (outputIndex >= 0) {
                         val configBuffer = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
                         if (!configBuffer && info.size > 0) {
                             val output = decoder.getOutputBuffer(outputIndex)
-                            val track = audioTrack ?: rebuildAudioTrack(decoder.outputFormat)
-                            if (output != null && track != null) {
+                            if (output != null) {
                                 output.position(info.offset)
                                 output.limit(info.offset + info.size)
-                                var remaining = info.size
-                                while (remaining > 0) {
-                                    val written = track.write(output, remaining, AudioTrack.WRITE_BLOCKING)
-                                    if (written <= 0) break
-                                    remaining -= written
-                                }
-                                onStarted()
+                                val pcm = ByteArray(info.size)
+                                output.get(pcm)
+                                onChunk(AudioChunk.Samples(pcm))
                             }
                         }
                         decoder.releaseOutputBuffer(outputIndex, false)
@@ -256,11 +376,7 @@ class AirPlayAudioReceiver(
             }
         }
 
-        private fun rebuildAudioTrack(format: MediaFormat): AudioTrack? {
-            runCatching { audioTrack?.stop() }
-            runCatching { audioTrack?.release() }
-            audioTrack = null
-
+        private fun extractFormat(format: MediaFormat): PcmFormat {
             val sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
             val channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
             val encoding = if (format.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
@@ -268,33 +384,7 @@ class AirPlayAudioReceiver(
             } else {
                 AudioFormat.ENCODING_PCM_16BIT
             }
-            val channelMask = when (channelCount) {
-                1 -> AudioFormat.CHANNEL_OUT_MONO
-                else -> AudioFormat.CHANNEL_OUT_STEREO
-            }
-            val minimumBuffer = AudioTrack.getMinBufferSize(sampleRate, channelMask, encoding)
-            if (minimumBuffer <= 0) return null
-
-            val track = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(encoding)
-                        .setSampleRate(sampleRate)
-                        .setChannelMask(channelMask)
-                        .build()
-                )
-                .setBufferSizeInBytes((minimumBuffer * 2).coerceAtLeast(16 * 1024))
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
-            track.play()
-            audioTrack = track
-            return track
+            return PcmFormat(sampleRate, channelCount, encoding)
         }
 
         fun release() {
@@ -304,10 +394,6 @@ class AirPlayAudioReceiver(
                 runCatching { currentCodec.stop() }
                 runCatching { currentCodec.release() }
             }
-            runCatching { audioTrack?.stop() }
-            runCatching { audioTrack?.flush() }
-            runCatching { audioTrack?.release() }
-            audioTrack = null
         }
     }
 
@@ -322,6 +408,9 @@ class AirPlayAudioReceiver(
         private const val AES_BLOCK_SIZE = 16
         private const val MAX_PACKET_SIZE = 64 * 1024
         private const val MAX_AAC_ACCESS_UNIT_SIZE = 64 * 1024
+        private const val UDP_RECEIVE_BUFFER_BYTES = 256 * 1024
+        private const val PCM_QUEUE_CAPACITY = 32
+        private const val PLAYBACK_POLL_MS = 100L
         private const val SOCKET_TIMEOUT_MS = 500
         private const val CODEC_INPUT_TIMEOUT_US = 5_000L
         private val NO_DATA_MARKER = byteArrayOf(0x00, 0x68, 0x34, 0x00)
@@ -381,17 +470,31 @@ internal object AirPlayAacEldConfig {
 internal object AirPlayAudioCrypto {
     private const val AES_BLOCK_SIZE = 16
 
+    fun createCipher(): Cipher = Cipher.getInstance("AES/CBC/NoPadding")
+
     fun decryptPayload(key: ByteArray, iv: ByteArray, payload: ByteArray): ByteArray {
         require(key.size == AES_BLOCK_SIZE) { "AES-128 key must be 16 bytes" }
         require(iv.size == AES_BLOCK_SIZE) { "AES-CBC IV must be 16 bytes" }
+        return decryptPayload(
+            secretKey = SecretKeySpec(key, "AES"),
+            ivSpec = IvParameterSpec(iv),
+            payload = payload,
+            cipher = createCipher(),
+        )
+    }
+
+    fun decryptPayload(
+        secretKey: SecretKeySpec,
+        ivSpec: IvParameterSpec,
+        payload: ByteArray,
+        cipher: Cipher,
+    ): ByteArray {
         if (payload.isEmpty()) return ByteArray(0)
 
         val encryptedLength = (payload.size / AES_BLOCK_SIZE) * AES_BLOCK_SIZE
         if (encryptedLength == 0) return payload.clone()
 
-        val cipher = Cipher.getInstance("AES/CBC/NoPadding").apply {
-            init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-        }
+        cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
         val decrypted = cipher.doFinal(payload, 0, encryptedLength)
         if (encryptedLength == payload.size) return decrypted
 

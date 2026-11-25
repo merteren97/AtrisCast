@@ -13,6 +13,10 @@ class ReceiverPreferences(context: Context) {
         get() = prefs.getBoolean(KEY_START_ON_BOOT, true)
         set(value) = prefs.edit().putBoolean(KEY_START_ON_BOOT, value).apply()
 
+    var autoOpenOnCast: Boolean
+        get() = prefs.getBoolean(KEY_AUTO_OPEN_ON_CAST, true)
+        set(value) = prefs.edit().putBoolean(KEY_AUTO_OPEN_ON_CAST, value).apply()
+
     var languageCode: String
         get() = prefs.getString(KEY_LANGUAGE, LANGUAGE_ENGLISH).orEmpty().ifBlank { LANGUAGE_ENGLISH }
         set(value) = prefs.edit().putString(KEY_LANGUAGE, normalizeLanguage(value)).apply()
@@ -26,6 +30,7 @@ class ReceiverPreferences(context: Context) {
         private const val PREFS = "atriscast_receiver"
         private const val KEY_DISPLAY_NAME = "display_name"
         private const val KEY_START_ON_BOOT = "start_on_boot"
+        private const val KEY_AUTO_OPEN_ON_CAST = "auto_open_on_cast"
         private const val KEY_LANGUAGE = "language"
 
         const val DEFAULT_NAME = "AtrisCast"

@@ -14,31 +14,43 @@ class MdnsAdvertiser(
     private val onError: (String) -> Unit,
 ) {
     private val nsd = context.getSystemService(NsdManager::class.java)
+    private val generation = AtomicInteger(0)
     private val registered = AtomicInteger(0)
     private var started = false
     private var airPlayListener: NsdManager.RegistrationListener? = null
     private var raopListener: NsdManager.RegistrationListener? = null
+    @Volatile private var registeredAirPlayName: String? = null
 
     @Synchronized
     fun start(displayName: String) {
         if (started) return
         started = true
+        val currentGeneration = generation.incrementAndGet()
         registered.set(0)
-        registerAirPlay(displayName)
-        registerRaop(displayName)
+        registeredAirPlayName = displayName
+        registerAirPlay(displayName, currentGeneration)
+        registerRaop(displayName, currentGeneration)
+    }
+
+    @Synchronized
+    fun restart(displayName: String) {
+        stop()
+        start(displayName)
     }
 
     @Synchronized
     fun stop() {
+        generation.incrementAndGet()
         airPlayListener?.let { runCatching { nsd.unregisterService(it) } }
         raopListener?.let { runCatching { nsd.unregisterService(it) } }
         airPlayListener = null
         raopListener = null
+        registeredAirPlayName = null
         started = false
         registered.set(0)
     }
 
-    private fun registerAirPlay(displayName: String) {
+    private fun registerAirPlay(displayName: String, expectedGeneration: Int) {
         val info = NsdServiceInfo().apply {
             serviceName = displayName
             serviceType = AirPlayProfile.AIRPLAY_TYPE
@@ -52,13 +64,14 @@ class MdnsAdvertiser(
             setAttribute("pi", identity.persistentId)
         }
 
-        airPlayListener = listener("AirPlay") { actualName ->
+        airPlayListener = listener("AirPlay", expectedGeneration) { actualName ->
+            registeredAirPlayName = actualName
             if (registered.incrementAndGet() >= 2) onReady(actualName)
         }
         nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, airPlayListener!!)
     }
 
-    private fun registerRaop(displayName: String) {
+    private fun registerRaop(displayName: String, expectedGeneration: Int) {
         val info = NsdServiceInfo().apply {
             serviceName = "${identity.raopPrefix}@$displayName"
             serviceType = AirPlayProfile.RAOP_TYPE
@@ -75,23 +88,31 @@ class MdnsAdvertiser(
             setAttribute("sf", AirPlayProfile.FLAGS)
         }
 
-        raopListener = listener("RAOP") {
-            if (registered.incrementAndGet() >= 2) onReady(displayName)
+        raopListener = listener("RAOP", expectedGeneration) {
+            if (registered.incrementAndGet() >= 2) {
+                onReady(registeredAirPlayName ?: displayName)
+            }
         }
         nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, raopListener!!)
     }
 
-    private fun listener(label: String, onRegistered: (String) -> Unit) =
-        object : NsdManager.RegistrationListener {
-            override fun onServiceRegistered(serviceInfo: NsdServiceInfo) =
-                onRegistered(serviceInfo.serviceName)
-
-            override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-                started = false
-                onError("$label mDNS registration failed ($errorCode)")
-            }
-
-            override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit
-            override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
+    private fun listener(
+        label: String,
+        expectedGeneration: Int,
+        onRegistered: (String) -> Unit,
+    ) = object : NsdManager.RegistrationListener {
+        override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
+            if (generation.get() != expectedGeneration) return
+            onRegistered(serviceInfo.serviceName)
         }
+
+        override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+            if (generation.get() != expectedGeneration) return
+            started = false
+            onError("$label mDNS registration failed ($errorCode)")
+        }
+
+        override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit
+        override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
+    }
 }

@@ -2,7 +2,11 @@ package com.atrishub.atriscast.airplay
 
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.InputStream
+import java.net.SocketTimeoutException
+
+class RtspIdleTimeoutException : IOException("RTSP idle socket timeout")
 
 object RtspRequestParser {
     fun read(input: InputStream): RtspRequest? {
@@ -44,7 +48,12 @@ object RtspRequestParser {
         val out = ByteArrayOutputStream()
         var state = 0
         while (out.size() < MAX_HEADER_BYTES) {
-            val b = input.read()
+            val b = try {
+                input.read()
+            } catch (timeout: SocketTimeoutException) {
+                if (out.size() == 0) throw RtspIdleTimeoutException()
+                throw timeout
+            }
             if (b < 0) return if (out.size() == 0) null else out.toByteArray()
             out.write(b)
             state = when {

@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">AtrisCast</string>
+    <string name="notification_channel_name">AtrisCast alıcısı</string>
+    <string name="notification_channel_description">Bu TV’de yerel AirPlay yayın alıcısını hazır tutar.</string>
+    <string name="cast_notification_channel_name">AirPlay tam ekran uyarıları</string>
+    <string name="cast_notification_channel_description">Gelen AirPlay ekran yansıtmasını ön plana taşır.</string>
+</resources>

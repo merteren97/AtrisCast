@@ -13,10 +13,12 @@ fun runCheckedProcess(
 ) {
     val process = ProcessBuilder(command)
         .directory(workingDir)
-        .inheritIO()
+        .redirectErrorStream(true)
         .apply { environment().putAll(extraEnvironment) }
         .start()
+    val output = process.inputStream.bufferedReader().readText()
     val exitCode = process.waitFor()
+    if (output.isNotBlank()) println(output)
     check(exitCode == 0) { "Command failed ($exitCode): ${command.joinToString(" ")}" }
 }
 
@@ -160,6 +162,13 @@ val buildFairPlayBridge = tasks.register("buildFairPlayBridge") {
         outputDir.deleteRecursively()
         outputDir.mkdirs()
 
+        val ndkEnv: Map<String, String> = if (System.getenv("ANDROID_NDK_HOME").isNullOrBlank()) {
+            val sdkRoot = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
+            val ndkDir = sdkRoot?.let { File(it, "ndk/27.2.12479018") }?.takeIf { it.isDirectory }
+            if (ndkDir != null) mapOf("ANDROID_NDK_HOME" to ndkDir.absolutePath) else emptyMap()
+        } else {
+            emptyMap()
+        }
         runCheckedProcess(
             fairPlayBridgeDir,
             listOf(
@@ -173,7 +182,7 @@ val buildFairPlayBridge = tasks.register("buildFairPlayBridge") {
             ),
             extraEnvironment = mapOf(
                 "CARGO_TARGET_DIR" to fairPlayCargoTargetDir.get().asFile.absolutePath,
-            ),
+            ) + ndkEnv,
         )
 
         val missingLibraries = expectedFairPlayLibraries(outputDir).filterNot { library ->

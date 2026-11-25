@@ -1,7 +1,7 @@
 <resources>
     <string name="app_name">AtrisCast</string>
-    <string name="notification_channel_name">AtrisCast Receiver</string>
-    <string name="notification_channel_description">Keeps AtrisCast discoverable on your local network.</string>
-    <string name="notification_title">AtrisCast is ready</string>
-    <string name="notification_text">Waiting for a local AirPlay connection</string>
+    <string name="notification_channel_name">AtrisCast receiver</string>
+    <string name="notification_channel_description">Keeps local AirPlay casting available on this TV.</string>
+    <string name="cast_notification_channel_name">AirPlay fullscreen alerts</string>
+    <string name="cast_notification_channel_description">Brings incoming AirPlay screen mirroring to the foreground.</string>
 </resources>

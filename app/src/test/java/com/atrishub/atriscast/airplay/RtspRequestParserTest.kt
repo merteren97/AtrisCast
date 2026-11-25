@@ -4,6 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 import java.io.ByteArrayInputStream
+import java.io.InputStream
+import java.net.SocketTimeoutException
 
 class RtspRequestParserTest {
     @Test
@@ -36,5 +38,26 @@ class RtspRequestParserTest {
     @Test
     fun returnsNullForEmptyInput() {
         assertNull(RtspRequestParser.read(ByteArrayInputStream(ByteArray(0))))
+    }
+
+    @Test(expected = RtspIdleTimeoutException::class)
+    fun distinguishesIdleTimeoutAtRequestBoundary() {
+        val timingOutInput = object : InputStream() {
+            override fun read(): Int = throw SocketTimeoutException("idle")
+        }
+        RtspRequestParser.read(timingOutInput)
+    }
+
+    @Test(expected = SocketTimeoutException::class)
+    fun propagatesTimeoutMidHeader() {
+        val partial = "OPTIONS * RTSP/1.0\r\n".toByteArray()
+        val midHeaderTimeoutInput = object : InputStream() {
+            private var index = 0
+            override fun read(): Int {
+                if (index < partial.size) return partial[index++].toInt() and 0xFF
+                throw SocketTimeoutException("mid-header")
+            }
+        }
+        RtspRequestParser.read(midHeaderTimeoutInput)
     }
 }
